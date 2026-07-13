@@ -1,26 +1,397 @@
-name: Find CPU OPP Table
+name: Build Garnet Kernel (SuKiSU + GPU OC)
 
-on: [workflow_dispatch]
+on:
+  push:
+    paths:
+      - '.github/workflows/build-kernel.yml'
+  workflow_dispatch:
+    inputs:
+      gpu_oc_freq:
+        description: 'GPU OC freq in Hz (new top level added above stock 940MHz)'
+        default: '1000000000'
+        required: true
+      gpu_oc_acd:
+        description: 'ACD level for OC freq (hex, stock 940M = 0xA82B5FFD)'
+        default: '0xA82B5FFD'
+        required: true
+      apply_uv:
+        description: 'Apply undervolt to stock 940MHz and below?'
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      sukisu_variant:
+        description: 'SuKiSU variant'
+        default: 'main'
+        type: choice
+        options:
+          - 'main'
+          
+  jobs:
+   build:
+    name: Build Kernel
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    steps:
+      - name: Free disk space
+        run: |
+          echo "=== Disk before cleanup ==="
+          df -h
+          sudo rm -rf \
+            /usr/share/dotnet /usr/share/swift /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" \
+            /usr/local/share/chromium /usr/share/php /usr/share/ruby
+          sudo apt-get clean
+          sudo docker system prune -af 2>/dev/null || true
+          echo "=== Disk after cleanup ==="
+          df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            git bc bison flex libssl-dev libelf-dev python3 python3-pip \
+            zip unzip curl wget gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            make libncurses-dev cpio pahole clang lld llvm device-tree-compiler \
+            openjdk-11-jdk-headless
+          pip3 install --quiet absl-py
+
+      - name: Clone okihann garnet_kernel (Private)
+        uses: actions/checkout@v4
+        with:
+          repository: okihann/garnet-kernel
+          ref: garnet-t-oss
+          token: ${{ secrets.GH_PAT }}
+          path: kernel
+
+      - name: Clone okihann garnet_devicetree (Private)
+        uses: actions/checkout@v4
+        with:
+          repository: okihann/garnet-devicetree
+          ref: garnet-t-oss
+          token: ${{ secrets.GH_PAT }}
+          path: kernel/kernel_devicetree
+
+      - name: Apply SuKiSU & SUSFS Hooks
+        working-directory: kernel
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s ${{ github.event.inputs.sukisu_variant || 'main' }}
+
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android12-5.10
+          cp susfs4ksu/kernel_patches/fs/* fs/
+          cp susfs4ksu/kernel_patches/include/linux/* include/linux/
+          
+          sed -i '1i #include <linux/cred.h>' include/linux/susfs_def.h || true
+          sed -i '1i #include <linux/cred.h>' include/linux/susfs.h || true
+          
+          sed -i '/diff --git a\/security\/selinux\/avc\.c/,$d' susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch
+          patch -p1 < susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch || true
+
+          cd KernelSU
+          SUPERCALL_C=$(find kernel -name "supercall.c" | head -n 1)
+          SUPERCALL_H=$(find kernel -name "supercall.h" | head -n 1)
+          
+          if [ ! -z "$SUPERCALL_C" ]; then
+            sed -i '1i #include <linux/susfs.h>' "$SUPERCALL_C"
+            sed -i '/return -EPERM;/i \	if (susfs_is_susfs_enabled && cmd == CMD_SUSFS_CONTROL) return 0;' "$SUPERCALL_C"
+          fi
+          
+          if [ ! -z "$SUPERCALL_H" ]; then
+            sed -i '1i #include <linux/susfs.h>' "$SUPERCALL_H"
+            CMD_DEF=$(grep -h "define.*CMD_SUSFS_CONTROL" ../susfs4ksu/kernel_patches/KernelSU/*.patch 2>/dev/null | sed 's/^+//' || true)
+            if [ ! -z "$CMD_DEF" ]; then
+              sed -i "2i $CMD_DEF" "$SUPERCALL_H"
+            fi
+          fi
+
+      - name: Fix broken Xiaomi & SukiSU dependencies
+        working-directory: kernel
+        run: |
+          if [ -d "KernelSU/uapi" ]; then
+            cp -r KernelSU/uapi KernelSU/kernel/
+          fi
+          
+          find KernelSU/kernel -name "Makefile" | while read makefile; do
+            grep -q "ccflags-y += -I\$(srctree)/drivers/kernelsu" "$makefile" || echo 'ccflags-y += -I$(srctree)/drivers/kernelsu' >> "$makefile"
+            grep -q "ccflags-y += -I\$(srctree)/drivers/kernelsu/include" "$makefile" || echo 'ccflags-y += -I$(srctree)/drivers/kernelsu/include' >> "$makefile"
+          done
+
+          if [ -f "KernelSU/kernel/kpm/kpm.h" ]; then
+            sed -i 's/static const __u32 KSU_IOCTL_KPM _IOC/#define KSU_IOCTL_KPM _IOC/g' KernelSU/kernel/kpm/kpm.h
+          fi
+          
+          sed -i '/hwid/d' drivers/misc/Makefile
+          sed -i '/plaid/d' drivers/misc/Makefile
+          sed -i 's|^source "drivers/misc/hwid/Kconfig"|# source "drivers/misc/hwid/Kconfig"|' drivers/misc/Kconfig
+          sed -i 's|^source "drivers/misc/plaid/Kconfig"|# source "drivers/misc/plaid/Kconfig"|' drivers/misc/Kconfig
+          
+          echo "#ifndef _HWID_H_" > dummy_hwid.h
+          echo "#define _HWID_H_" >> dummy_hwid.h
+          echo "static inline int get_hw_country_version(void) { return 0; }" >> dummy_hwid.h
+          echo "static inline int get_hw_version_platform(void) { return 0; }" >> dummy_hwid.h
+          grep -rE "HARDWARE_PROJECT_|Country[A-Z]" . --exclude="dummy_hwid.h" | grep -oE "HARDWARE_PROJECT_[A-Z0-9_]+|Country[A-Z][a-zA-Z]+" | sort -u | while read -r line; do
+            echo "#define $line 0" >> dummy_hwid.h
+          done
+          echo "#endif" >> dummy_hwid.h
+          
+          grep -rl "hwid.h" . | xargs -I {} dirname {} | sort -u | while read -r dir; do
+name: Build Garnet Kernel (SuKiSU + GPU OC)
+
+on:
+  push:
+    paths:
+      - '.github/workflows/build-kernel.yml'
+  workflow_dispatch:
+    inputs:
+      gpu_oc_freq:
+        description: 'GPU OC freq in Hz (new top level added above stock 940MHz)'
+        default: '1000000000'
+        required: true
+      gpu_oc_acd:
+        description: 'ACD level for OC freq (hex, stock 940M = 0xA82B5FFD)'
+        default: '0xA82B5FFD'
+        required: true
+      apply_uv:
+        description: 'Apply undervolt to stock 940MHz and below?'
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      sukisu_variant:
+        description: 'SuKiSU variant'
+        default: 'main'
+        type: choice
+        options:
+          - 'main'
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Build Kernel
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
     steps:
-      - name: Install dtc
-        run: sudo apt-get update && sudo apt-get install -y device-tree-compiler build-essential
-
-      - name: Clone Device Tree
+      - name: Free disk space
         run: |
-          git clone https://github.com/Contolodon/android_kernel_xiaomi_sm7435-devicetrees.git -b lineage-23 devicetree
+          echo "=== Disk before cleanup ==="
+          df -h
+          sudo rm -rf \
+            /usr/share/dotnet /usr/share/swift /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" \
+            /usr/local/share/chromium /usr/share/php /usr/share/ruby
+          sudo apt-get clean
+          sudo docker system prune -af 2>/dev/null || true
+          echo "=== Disk after cleanup ==="
+          df -h
 
-      - name: Cari frekuensi CPU spesifik
+      - name: Install build dependencies
         run: |
-         cd devicetree
-         echo "=== Cari 1958 (little core) ==="
-         grep -rn "1958" qcom/
-         echo ""
-         echo "=== Cari 2400 / 2419 (big core) ==="
-         grep -rn "2400\|2419" qcom/
-         echo ""
-         echo "=== Cari node CPU & cpufreq_hw ==="
-         grep -rn "qcom,kryo\|cpufreq_hw\|cpufreq-hw\|cpufreq-epss\|qcom,freq-domain" qcom/ | head -60
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            git bc bison flex libssl-dev libelf-dev python3 python3-pip \
+            zip unzip curl wget gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            make libncurses-dev cpio pahole clang lld llvm device-tree-compiler \
+            openjdk-11-jdk-headless
+          pip3 install --quiet absl-py
+
+      - name: Clone okihann garnet_kernel (Private)
+        uses: actions/checkout@v4
+        with:
+          repository: okihann/garnet-kernel
+          ref: garnet-t-oss
+          token: ${{ secrets.GH_PAT }}
+          path: kernel
+
+      - name: Clone okihann garnet_devicetree (Private)
+        uses: actions/checkout@v4
+        with:
+          repository: okihann/garnet-devicetree
+          ref: garnet-t-oss
+          token: ${{ secrets.GH_PAT }}
+          path: kernel/kernel_devicetree
+
+      - name: Apply SuKiSU & SUSFS Hooks
+        working-directory: kernel
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s ${{ github.event.inputs.sukisu_variant || 'main' }}
+
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android12-5.10
+          cp susfs4ksu/kernel_patches/fs/* fs/
+          cp susfs4ksu/kernel_patches/include/linux/* include/linux/
+          
+          sed -i '1i #include <linux/cred.h>' include/linux/susfs_def.h || true
+          sed -i '1i #include <linux/cred.h>' include/linux/susfs.h || true
+          
+          sed -i '/diff --git a\/security\/selinux\/avc\.c/,$d' susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch
+          patch -p1 < susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch || true
+
+          cd KernelSU
+          SUPERCALL_C=$(find kernel -name "supercall.c" | head -n 1)
+          SUPERCALL_H=$(find kernel -name "supercall.h" | head -n 1)
+          
+          if [ ! -z "$SUPERCALL_C" ]; then
+            sed -i '1i #include <linux/susfs.h>' "$SUPERCALL_C"
+            sed -i '/return -EPERM;/i \	if (susfs_is_susfs_enabled && cmd == CMD_SUSFS_CONTROL) return 0;' "$SUPERCALL_C"
+          fi
+          
+          if [ ! -z "$SUPERCALL_H" ]; then
+            sed -i '1i #include <linux/susfs.h>' "$SUPERCALL_H"
+            CMD_DEF=$(grep -h "define.*CMD_SUSFS_CONTROL" ../susfs4ksu/kernel_patches/KernelSU/*.patch 2>/dev/null | sed 's/^+//' || true)
+            if [ ! -z "$CMD_DEF" ]; then
+              sed -i "2i $CMD_DEF" "$SUPERCALL_H"
+            fi
+          fi
+
+      - name: Fix broken Xiaomi & SukiSU dependencies
+        working-directory: kernel
+        run: |
+          if [ -d "KernelSU/uapi" ]; then
+            cp -r KernelSU/uapi KernelSU/kernel/
+          fi
+          
+          find KernelSU/kernel -name "Makefile" | while read makefile; do
+            grep -q "ccflags-y += -I\$(srctree)/drivers/kernelsu" "$makefile" || echo 'ccflags-y += -I$(srctree)/drivers/kernelsu' >> "$makefile"
+            grep -q "ccflags-y += -I\$(srctree)/drivers/kernelsu/include" "$makefile" || echo 'ccflags-y += -I$(srctree)/drivers/kernelsu/include' >> "$makefile"
+          done
+
+          if [ -f "KernelSU/kernel/kpm/kpm.h" ]; then
+            sed -i 's/static const __u32 KSU_IOCTL_KPM _IOC/#define KSU_IOCTL_KPM _IOC/g' KernelSU/kernel/kpm/kpm.h
+          fi
+          
+          sed -i '/hwid/d' drivers/misc/Makefile
+          sed -i '/plaid/d' drivers/misc/Makefile
+          sed -i 's|^source "drivers/misc/hwid/Kconfig"|# source "drivers/misc/hwid/Kconfig"|' drivers/misc/Kconfig
+          sed -i 's|^source "drivers/misc/plaid/Kconfig"|# source "drivers/misc/plaid/Kconfig"|' drivers/misc/Kconfig
+          
+          echo "#ifndef _HWID_H_" > dummy_hwid.h
+          echo "#define _HWID_H_" >> dummy_hwid.h
+          echo "static inline int get_hw_country_version(void) { return 0; }" >> dummy_hwid.h
+          echo "static inline int get_hw_version_platform(void) { return 0; }" >> dummy_hwid.h
+          grep -rE "HARDWARE_PROJECT_|Country[A-Z]" . --exclude="dummy_hwid.h" | grep -oE "HARDWARE_PROJECT_[A-Z0-9_]+|Country[A-Z][a-zA-Z]+" | sort -u | while read -r line; do
+            echo "#define $line 0" >> dummy_hwid.h
+          done
+          echo "#endif" >> dummy_hwid.h
+          
+          grep -rl "hwid.h" . | xargs -I {} dirname {} | sort -u | while read -r dir; do
+            cp dummy_hwid.h "$dir/hwid.h"
+          done
+          
+          python3 -c "
+          import sys
+          content = open('drivers/usb/gadget/udc/core.c').read()
+          funcs = ['usb_gadget_enable_async_callbacks', 'usb_gadget_disable_async_callbacks']
+          for f in funcs:
+              parts = content.split('static inline void ' + f)
+              if len(parts) > 2:
+                  sub_parts = parts[2].split('}', 1)
+                  if len(sub_parts) == 2:
+                      content = parts[0] + 'static inline void ' + f + parts[1] + '#if 0\nstatic inline void ' + f + sub_parts[0] + '}\n#endif\n' + sub_parts[1]
+          open('drivers/usb/gadget/udc/core.c', 'w').write(content)
+          "
+          
+          PLAID_CALLER=$(grep -rl "plaid.h" . | head -1)
+          if [ ! -z "$PLAID_CALLER" ]; then
+            PLAID_DIR=$(dirname "$PLAID_CALLER")
+            echo "/* Dummy */" > "$PLAID_DIR/plaid.h"
+          fi
+          rm dummy_hwid.h
+          
+      - name: Configure and Patch Kernel
+        working-directory: kernel
+        run: |
+          append_if_missing() {
+            grep -qF "$1" "$CONFIG_FILE" || echo "$1" >> "$CONFIG_FILE"
+          }
+          
+          echo "KBUILD_CFLAGS += -Wno-error" >> Makefile
+          echo "KBUILD_CPPFLAGS += -Wno-error" >> Makefile
+          
+          export CONF="make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-"
+          
+          $CONF gki_defconfig
+
+          CONSOLIDATE=$(find arch/arm64/configs/vendor -name "garnet_consolidate.config" | sed 's|arch/arm64/configs/||')
+          [ ! -z "$CONSOLIDATE" ] && $CONF "$CONSOLIDATE"
+
+          GKI_FRAG=$(find arch/arm64/configs/vendor -name "garnet_GKI.config" | sed 's|arch/arm64/configs/||')
+          [ ! -z "$GKI_FRAG" ] && $CONF "$GKI_FRAG"
+          
+          CONFIG_FILE="out/.config"
+
+          append_if_missing "CONFIG_KPM=y"
+          append_if_missing "CONFIG_KALLSYMS=y"
+          append_if_missing "CONFIG_KALLSYMS_ALL=y"
+          append_if_missing "CONFIG_TCP_CONG_BBR=y"
+          append_if_missing 'CONFIG_DEFAULT_TCP_CONG="bbr"'
+          append_if_missing "CONFIG_ZRAM=y"
+          append_if_missing "CONFIG_KSU=y"
+          append_if_missing "CONFIG_KSU_SUSFS=y"
+          append_if_missing "CONFIG_KSU_SUSFS_SUS_PATH=y"
+          append_if_missing "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
+          append_if_missing "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
+          append_if_missing "CONFIG_KSU_SUSFS_ENABLE_ALGO=y"
+          append_if_missing "CONFIG_ZSMALLOC=y"
+          append_if_missing "CONFIG_CRYPTO_LZ4=y"
+          append_if_missing "CONFIG_CRYPTO_ZSTD=y"
+          append_if_missing "CONFIG_UBSAN=n"
+          append_if_missing "CONFIG_KASAN=n"
+          append_if_missing "CONFIG_INIT_STACK_NONE=y"
+          append_if_missing "CONFIG_INIT_ON_ALLOC_DEFAULT_ON=n"
+          append_if_missing "CONFIG_INIT_ON_FREE_DEFAULT_ON=n"
+          
+          $CONF olddefconfig
+       
+      - name: Patch GPU freq table (OC + UV)
+        run: |
+          python3 kernel/patch_gpu_dtsi.py \
+            --dtsi kernel/kernel_devicetree/qcom/parrot-gpu.dtsi \
+            --oc-freq ${{ github.event.inputs.gpu_oc_freq || '1000000000' }} \
+            --oc-acd "${{ github.event.inputs.gpu_oc_acd || '0xA82B5FFD' }}" \
+            --apply-uv ${{ github.event.inputs.apply_uv || 'true' }}
+
+      - name: Build kernel (make)
+        working-directory: kernel
+        run: |
+          set -o pipefail
+          {
+            make O=out ARCH=arm64 -j$(nproc) CC=clang CROSS_COMPILE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1
+          } 2>&1 | tee ../build.log
+
+      - name: Package with AnyKernel3
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3.git -b master AnyKernel3
+          rm -rf AnyKernel3/.git AnyKernel3/README.md
+          
+          find kernel/out -name "Image" -exec cp {} AnyKernel3/ \; 2>/dev/null || true
+          
+          echo "Gathering and concatenating device tree files..."
+          find kernel/out -name "*.dtb" -exec cat {} + > AnyKernel3/dtb || true
+          
+          cd AnyKernel3
+          sed -i 's/device.name1=maguro/device.name1=garnet/' anykernel.sh
+          sed -i 's/device.name2=toro/device.name2=/' anykernel.sh
+          sed -i 's/device.name3=toroplus/device.name3=/' anykernel.sh
+          sed -i 's/device.name4=tuna/device.name4=/' anykernel.sh
+          sed -i 's/block=\/dev\/block\/platform\/omap\/omap_hsmmc.0\/by-name\/boot;/block=auto;/' anykernel.sh
+          sed -i 's/is_slot_device=0;/is_slot_device=auto;/' anykernel.sh
+          
+          sed -i '/# init.rc/,$d' anykernel.sh
+          echo "write_boot; # repacks the new Image and flashes it" >> anykernel.sh
+          echo "## end boot install" >> anykernel.sh
+
+          zip -r9 ../Garnet-Custom-Kernel-${{ github.event.inputs.gpu_oc_freq || '1000000000' }}Hz.zip *
+
+      - name: Upload Flashable Zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: Garnet-Flashable-Kernel-${{ github.event.inputs.gpu_oc_freq || '1000000000' }}hz
+          path: Garnet-Custom-Kernel-*.zip
+          retention-days: 7
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
