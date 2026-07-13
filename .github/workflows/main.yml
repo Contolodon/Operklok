@@ -1,0 +1,30 @@
+name: Find CPU OPP Table
+
+on: [workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install dtc
+        run: sudo apt-get update && sudo apt-get install -y device-tree-compiler build-essential
+
+      - name: Clone Device Tree
+        run: |
+          git clone https://github.com/Contolodon/android_kernel_xiaomi_sm7435-devicetrees.git -b lineage-23 devicetree
+
+      - name: Cari & tampilkan tabel OPP CPU
+        run: |
+          cd devicetree
+          echo "=== File dengan cpufreq-hw/epss ==="
+          grep -rl "cpufreq-hw\|cpufreq-epss" qcom/ || echo "tidak ketemu"
+          echo ""
+          echo "=== File dengan operating-points-v2 ==="
+          FILES=$(grep -rl "operating-points-v2" qcom/ || true)
+          echo "$FILES"
+          echo ""
+          echo "=== Isi tabel OPP (per file) ==="
+          for f in $FILES; do
+            echo "--- $f ---"
+            grep -n -B2 -A 25 "opp_table\|opp-table\|opp-[0-9]\{6,\}" "$f" | head -200
+          done
