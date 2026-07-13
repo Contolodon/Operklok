@@ -13,14 +13,14 @@ jobs:
         run: |
           git clone https://github.com/Contolodon/android_kernel_xiaomi_sm7435-devicetrees.git -b lineage-23 devicetree
 
-- name: Cari frekuensi CPU spesifik
-  run: |
-    cd devicetree
-    echo "=== Cari 1958 (little core) ==="
-    grep -rn "1958" qcom/
-    echo ""
-    echo "=== Cari 2400 / 2419 (big core) ==="
-    grep -rn "2400\|2419" qcom/
-    echo ""
-    echo "=== Cari node CPU & cpufreq_hw ==="
-    grep -rn "qcom,kryo\|cpufreq_hw\|cpufreq-hw\|cpufreq-epss\|qcom,freq-domain" qcom/ | head -60
+      - name: Cari frekuensi CPU spesifik
+        run: |
+         cd devicetree
+         echo "=== Cari 1958 (little core) ==="
+         grep -rn "1958" qcom/
+         echo ""
+         echo "=== Cari 2400 / 2419 (big core) ==="
+         grep -rn "2400\|2419" qcom/
+         echo ""
+         echo "=== Cari node CPU & cpufreq_hw ==="
+         grep -rn "qcom,kryo\|cpufreq_hw\|cpufreq-hw\|cpufreq-epss\|qcom,freq-domain" qcom/ | head -60
