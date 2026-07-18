@@ -48,23 +48,31 @@ jobs:
           repo init -u https://android.googlesource.com/kernel/manifest -b common-android12-5.10 --depth=1
           repo sync -c -j$(nproc) --no-tags --no-clone-bundle
 
+      
       - name: Build Kernel Headers
         working-directory: gki
         run: |
           echo "Building kernel headers..."
           cd common
-          # Pastikan folder output bersih dan siap
           mkdir -p ../out
+          
+          # Gunakan konfigurasi yang lebih generik untuk memaksa pembuatan file simbol
           make O=../out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- mrproper
           make O=../out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
-          make O=../out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
           
-          if [ -f "../out/Module.symvers" ]; then
-            echo "✅ Headers ready!"
+          # Tambahkan perintah 'modules' untuk memastikan Module.symvers tergenerate
+          make O=../out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
+          make O=../out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules
+          
+          # Pengecekan lebih fleksibel
+          if [ -f "../out/Module.symvers" ] || [ -f "Module.symvers" ]; then
+            echo "✅ Headers/Symbols ready!"
           else
-            echo "❌ Module.symvers gagal dibuat!"
+            echo "❌ Gagal total! Mencari file simbol..."
+            find . -name "Module.symvers"
             exit 1
           fi
+          
 
       - name: Create CPU Overclock Module
         run: |
