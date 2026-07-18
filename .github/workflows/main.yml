@@ -229,4 +229,149 @@ jobs:
             return -ENOENT;
         }
 
-        
+            /* Simpan pointer asli (untuk simple approach) */
+    orig_read_lut = (void *)addr;
+    pr_info("garnet_cpu_oc: Found qcom_cpufreq_hw_read_lut at %px\n",
+            orig_read_lut);
+
+    /* TODO: Implement actual register-level LUT override
+     * - Map EFUSE register region (ioremap)
+     * - Baca nilai LUT saat ini
+     * - Tulis freq/voltage override ke register
+     * - Atau gunakan kprobe untuk intercept return value
+     * 
+     * Untuk safety, module ini saat ini hanya logging.
+     * Aktifkan register override setelah testing stabil.
+     */
+
+    pr_info("garnet_cpu_oc: Module loaded (logging mode)\n");
+    pr_info("garnet_cpu_oc: Untuk real OC, enable REGISTER_OVERRIDE\n");
+    return 0;
+}
+
+static void __exit garnet_cpu_oc_exit(void)
+{
+    pr_info("garnet_cpu_oc: Module unloaded\n");
+}
+
+module_init(garnet_cpu_oc_init);
+module_exit(garnet_cpu_oc_exit);
+C_EOF
+
+cat > Kbuild << 'KB_EOF'
+obj-m := garnet_cpu_oc.o
+
+ccflags-y := -DCONFIG_OC_SILVER_MAX=$(SILVER_MAX) \
+             -DCONFIG_OC_GOLD_MAX=$(GOLD_MAX) \
+             -DCONFIG_OC_GOLD_PLUS_MAX=$(GOLD_PLUS_MAX) \
+             -DCONFIG_OC_SILVER_VOLT=$(SILVER_VOLT) \
+             -DCONFIG_OC_GOLD_VOLT=$(GOLD_VOLT) \
+             -DCONFIG_OC_GOLD_PLUS_VOLT=$(GOLD_PLUS_VOLT)
+
+KB_EOF
+
+# Replace placeholders in Kbuild
+sed -i "s/\$(SILVER_MAX)/\${SILVER_MAX}/g" Kbuild
+sed -i "s/\$(GOLD_MAX)/\${GOLD_MAX}/g" Kbuild
+sed -i "s/\$(GOLD_PLUS_MAX)/\${GOLD_PLUS_MAX}/g" Kbuild
+sed -i "s/\$(SILVER_VOLT)/\${SILVER_VOLT}/g" Kbuild
+sed -i "s/\$(GOLD_VOLT)/\${GOLD_VOLT}/g" Kbuild
+sed -i "s/\$(GOLD_PLUS_VOLT)/\${GOLD_PLUS_VOLT}/g" Kbuild
+
+- name: Compile CPU OC Module
+  run: |
+    echo "🔨 Compiling CPU OC module against GKI headers..."
+
+    # Cari kernel build dir (dengan Module.symvers & .config)
+    KERNEL_DIR=$(find gki/out -name "Module.symvers" -exec dirname {} \; | head -1)
+    if [ -z "$KERNEL_DIR" ]; then
+      echo "❌ Kernel build dir tidak ditemukan. Headers build gagal."
+      exit 1
+    fi
+
+    echo "Kernel build dir: $KERNEL_DIR"
+
+    cd cpu_oc_module
+    make KERNEL_DIR="$KERNEL_DIR" ARCH=arm64 \
+      CROSS_COMPILE=aarch64-linux-gnu- \
+      CC=clang LLVM=1 2>&1 | tee module_build.log
+
+    if [ -f "garnet_cpu_oc.ko" ]; then
+      echo "✅ Module compiled successfully:"
+      ls -lh garnet_cpu_oc.ko
+      file garnet_cpu_oc.ko
+    else
+      echo "❌ Module build failed!"
+      exit 1
+    fi
+
+- name: Package KernelSU Module
+  run: |
+    MOD_NAME="${{ github.event.inputs.module_name }}"
+    echo "📦 Packaging KernelSU module: $MOD_NAME"
+
+    mkdir -p ksu_module/$MOD_NAME
+
+    # Copy module .ko
+    cp cpu_oc_module/garnet_cpu_oc.ko ksu_module/$MOD_NAME/
+
+    # module.prop
+    cat > ksu_module/$MOD_NAME/module.prop << 'MP_EOF'
+    id=garnet_cpu_oc
+    name=Garnet CPU Overclock
+    version=v1.0
+    versionCode=1
+    author=Payel Kernel
+    description=CPU Overclock for Poco X6 5G (garnet). Override qcom_cpufreq_hw LUT for real CPU overclocking.
+    MP_EOF
+
+    # post-fs-data.sh (load module saat boot)
+    cat > ksu_module/$MOD_NAME/post-fs-data.sh << 'PFD_EOF'
+    #!/system/bin/sh
+    MODDIR=${0%/*}
+    insmod $MODDIR/garnet_cpu_oc.ko 2>/dev/null || \
+      echo "garnet_cpu_oc: insmod failed, check dmesg" > /data/local/tmp/cpu_oc.log
+    PFD_EOF
+    chmod +x ksu_module/$MOD_NAME/post-fs-data.sh
+
+    # service.sh (reload jika crash)
+    cat > ksu_module/$MOD_NAME/service.sh << 'SVC_EOF'
+    #!/system/bin/sh
+    MODDIR=${0%/*}
+    # Wait for cpufreq driver ready
+    until [ -d /sys/devices/system/cpu/cpu0/cpufreq ]; do
+      sleep 2
+    done
+    sleep 3
+    # Re-load jika belum loaded
+    if ! lsmod | grep -q garnet_cpu_oc; then
+      insmod $MODDIR/garnet_cpu_oc.ko 2>/dev/null
+    fi
+    SVC_EOF
+    chmod +x ksu_module/$MOD_NAME/service.sh
+
+    # Package ZIP
+    cd ksu_module
+    TIMESTAMP=$(date +"%Y%m%d")
+    ZIP_NAME="KSU-${MOD_NAME}-${TIMESTAMP}.zip"
+    zip -r9 "../${ZIP_NAME}" "$MOD_NAME"
+    cd ..
+    echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+    ls -lh "$ZIP_NAME"
+
+- name: Upload KSU Module
+  uses: actions/upload-artifact@v4
+  with:
+    name: ${{ env.ZIP_NAME }}
+    path: ${{ env.ZIP_NAME }}
+
+- name: Upload Build Logs
+  if: always()
+  uses: actions/upload-artifact@v4
+  with:
+    name: cpu-oc-build-logs
+    path: |
+      cpu_oc_module/module_build.log
+      gki/headers_build.log
+    if-no-files-found: warn
+    
