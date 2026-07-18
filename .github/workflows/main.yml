@@ -112,6 +112,7 @@ jobs:
           echo "  Silver:  ${SILVER_MAX} kHz @ ${SILVER_V} uV"
           echo "  Gold:    ${GOLD_MAX} kHz @ ${GOLD_V} uV"
 
+          # Menggunakan trik _TAB_ untuk menghindari error spasi di Makefile YAML
           cat > Makefile << 'MK_EOF'
           obj-m := garnet_cpu_oc.o
 
@@ -122,169 +123,138 @@ jobs:
           all: module
 
           module:
-          	$(MAKE) -C $(KDIR) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules
+          _TAB_$(MAKE) -C $(KDIR) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules
 
           clean:
-          	$(MAKE) -C $(KDIR) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) clean
+          _TAB_$(MAKE) -C $(KDIR) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) clean
           MK_EOF
+          
+          # Mengubah placeholder menjadi Tab asli
+          sed -i 's/^_TAB_/\t/g' Makefile
 
           cat > garnet_cpu_oc.c << 'C_EOF'
           /*
            * garnet_cpu_oc.c - CPU Overclock Module for Poco X6 5G (garnet)
-           *
-           * Hooks qcom_cpufreq_hw_read_lut() untuk override EFUSE LUT register.
-           * Driver qcom-cpufreq-hw membaca frequency table dari hardware register,
-           * bukan dari Device Tree. Module ini meng-override nilai yang dibaca
-           * untuk mencapai real CPU overclocking.
-           *
-           * Load via KernelSU: /data/adb/modules/garnet_cpu_oc/garnet_cpu_oc.ko
+           * Hooks qcom_cpufreq_hw_read_lut() via Kretprobe.
            */
-
           #include <linux/module.h>
           #include <linux/kernel.h>
           #include <linux/init.h>
           #include <linux/cpufreq.h>
-          #include <linux/io.h>
-          #include <linux/of.h>
-          #include <linux/platform_device.h>
-          #include <linux/slab.h>
-          #include <linux/kallsyms.h>
-               
-          /* Override frequencies (kHz) - diisi dari workflow input */
+          #include <linux/kprobes.h>
+          #include <linux/ptrace.h>
+          
           #define SILVER_MAX_FREQ   CONFIG_OC_SILVER_MAX
           #define GOLD_MAX_FREQ     CONFIG_OC_GOLD_MAX
-                     
-          /* Override voltages (uV) */
           #define SILVER_MAX_VOLT   CONFIG_OC_SILVER_VOLT
           #define GOLD_MAX_VOLT     CONFIG_OC_GOLD_VOLT
 
           MODULE_LICENSE("GPL");
           MODULE_AUTHOR("Payel Kernel");           
-          MODULE_DESCRIPTION("CPU Overclock for Poco X6 5G (garnet)");           
-          MODULE_VERSION("1.0");
+          MODULE_DESCRIPTION("CPU Overclock for Poco X6 5G (garnet) via Kprobe");           
+          MODULE_VERSION("1.1");
           
-          /* Original function pointer untuk restore */
-          static int (*orig_read_lut)(struct cpufreq_policy *policy);
+          struct oc_probe_data {
+              struct cpufreq_policy *policy;
+          };
 
-          /**
-           * Hooked version of qcom_cpufreq_hw_read_lut
-           *
-           * Setelah driver asli baca LUT dari EFUSE register,
-           * kita override freq/voltage tertinggi untuk setiap cluster.
-           */
-          static int hooked_read_lut(struct cpufreq_policy *policy)
+          static int entry_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
           {
-              int ret;
-              unsigned int cpu = policy->cpu;
+              struct oc_probe_data *data = (struct oc_probe_data *)ri->data;
+              data->policy = (struct cpufreq_policy *)regs->regs[0];
+              return 0;
+          }
 
-              /* Panggil fungsi asli dulu */
-              ret = orig_read_lut(policy);
-              if (ret < 0)
-                  return ret;
+          static int ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
+          {
+              struct oc_probe_data *data = (struct oc_probe_data *)ri->data;
+              struct cpufreq_policy *policy = data->policy;
+              unsigned int cpu;
 
-              /* Override freq tertinggi berdasarkan cluster */
-              /* Garnet: CPU 0-3 = Silver, 4-7 = Gold, */
+              if (!policy) return 0;
+              cpu = policy->cpu;
+
               if (cpu <= 3) {
-                  /* Silver cluster (LITTLE) */
                   if (policy->max < SILVER_MAX_FREQ) {
-                      pr_info("garnet_oc: Silver CPU%d: %u -> %u kHz\n",
+                      pr_info("garnet_oc: [KPROBE] Override Silver CPU%d Max: %u -> %u kHz\n",
                           cpu, policy->max, SILVER_MAX_FREQ);
                       policy->max = SILVER_MAX_FREQ;
                       policy->cpuinfo.max_freq = SILVER_MAX_FREQ;
                   }
               } else if (cpu >= 4 && cpu <= 7) {
-                  /* Gold cluster (big) */
                   if (policy->max < GOLD_MAX_FREQ) {
-                      pr_info("garnet_oc: Gold CPU%d: %u -> %u kHz\n",
+                      pr_info("garnet_oc: [KPROBE] Override Gold CPU%d Max: %u -> %u kHz\n",
                           cpu, policy->max, GOLD_MAX_FREQ);
                       policy->max = GOLD_MAX_FREQ;
                       policy->cpuinfo.max_freq = GOLD_MAX_FREQ;
                   }
               }
-              /* Update freq_table (jika ada) untuk reflect new max */
+
               if (policy->freq_table) {
                   int i;
                   for (i = 0; policy->freq_table[i].frequency != CPUFREQ_TABLE_END; i++) {
-                      /* Log saja, actual LUT override butuh register access */
+                      if (cpu <= 3 && policy->freq_table[i].frequency >= policy->max) {
+                          policy->freq_table[i].frequency = SILVER_MAX_FREQ;
+                      } else if (cpu >= 4 && policy->freq_table[i].frequency >= policy->max) {
+                          policy->freq_table[i].frequency = GOLD_MAX_FREQ;
+                      }
                   }
               }
+              return 0;
+          }
 
-              return ret;
-         }
+          static struct kretprobe my_kretprobe = {
+              .handler = ret_handler,
+              .entry_handler = entry_handler,
+              .data_size = sizeof(struct oc_probe_data),
+              .maxactive = 12,
+          };
 
-       /**
-        * Inline hook via kallsyms lookup
-        * Note: Untuk GKI 5.10, kprobes hook lebih reliable
-        */
-       static int __init garnet_cpu_oc_init(void)
-       {
-           unsigned long addr;
+          static int __init garnet_cpu_oc_init(void)
+          {
+              int ret;
+              pr_info("garnet_cpu_oc: Initializing CPU Overclock Module\n");
+              pr_info("garnet_cpu_oc: Target Silver=%u kHz, Gold=%u kHz\n", SILVER_MAX_FREQ, GOLD_MAX_FREQ);
 
-           pr_info("garnet_cpu_oc: Initializing CPU Overclock Module\n");
-           pr_info("garnet_cpu_oc: Silver max=%u Gold max=%u\n",
-               SILVER_MAX_FREQ, GOLD_MAX_FREQ);
+              my_kretprobe.kp.symbol_name = "qcom_cpufreq_hw_read_lut";
+              ret = register_kretprobe(&my_kretprobe);
+              
+              if (ret < 0) {
+                  pr_err("garnet_cpu_oc: Failed to register kretprobe (%d)\n", ret);
+                  return ret;
+              }
 
-           /* Lookup alamat fungsi qcom_cpufreq_hw_read_lut */
-           if (!addr) {
-               pr_err("garnet_cpu_oc: Cannot find qcom_cpufreq_hw_read_lut\n");
-               pr_err("garnet_cpu_oc: Pastikan CONFIG_KALLSYMS=y di kernel\n");
-               return -ENOENT;
-           }
+              pr_info("garnet_cpu_oc: Kretprobe registered. REAL OVERCLOCK AKTIF!\n");
+              return 0;
+          }
 
-           /* Simpan pointer asli (untuk simple approach) */
-           orig_read_lut = (void *)addr;
-           pr_info("garnet_cpu_oc: Found qcom_cpufreq_hw_read_lut at %px\n",
-                   orig_read_lut);
+          static void __exit garnet_cpu_oc_exit(void)
+          {
+              unregister_kretprobe(&my_kretprobe);
+              pr_info("garnet_cpu_oc: Module unloaded.\n");
+          }
 
-           /* TODO: Implement actual register-level LUT override
-            * - Map EFUSE register region (ioremap)
-            * - Baca nilai LUT saat ini
-            * - Tulis freq/voltage override ke register
-            * - Atau gunakan kprobe untuk intercept return value
-            * 
-            * Untuk safety, module ini saat ini hanya logging.
-            * Aktifkan register override setelah testing stabil.
-            */
+          module_init(garnet_cpu_oc_init);
+          module_exit(garnet_cpu_oc_exit);
+          C_EOF
 
-           pr_info("garnet_cpu_oc: Module loaded (logging mode)\n");
-           pr_info("garnet_cpu_oc: Untuk real OC, enable REGISTER_OVERRIDE\n");
-           return 0;
-       }
+          cat > Kbuild << 'KB_EOF'
+          obj-m := garnet_cpu_oc.o
 
-       static void __exit garnet_cpu_oc_exit(void)
-       {
-           pr_info("garnet_cpu_oc: Module unloaded\n");
-       }
+          ccflags-y := -DCONFIG_OC_SILVER_MAX=$(SILVER_MAX) \
+                       -DCONFIG_OC_GOLD_MAX=$(GOLD_MAX) \
+                       -DCONFIG_OC_SILVER_VOLT=$(SILVER_VOLT) \
+                       -DCONFIG_OC_GOLD_VOLT=$(GOLD_VOLT)
+          KB_EOF
 
-       module_init(garnet_cpu_oc_init);
-       module_exit(garnet_cpu_oc_exit);
-       C_EOF
-
-       cat > Kbuild << 'KB_EOF'
-       obj-m := garnet_cpu_oc.o
-
-       ccflags-y := -DCONFIG_OC_SILVER_MAX=$(SILVER_MAX) \
-                    -DCONFIG_OC_GOLD_MAX=$(GOLD_MAX) \
-                    -DCONFIG_OC_GOLD_PLUS_MAX=$(GOLD_PLUS_MAX) \
-                    -DCONFIG_OC_SILVER_VOLT=$(SILVER_VOLT) \
-                    -DCONFIG_OC_GOLD_VOLT=$(GOLD_VOLT) \
-                    -DCONFIG_OC_GOLD_PLUS_VOLT=$(GOLD_PLUS_VOLT)
-
-       KB_EOF
-
-       # Replace placeholders in Kbuild
-       sed -i "s/\$(SILVER_MAX)/\${SILVER_MAX}/g" Kbuild
-       sed -i "s/\$(GOLD_MAX)/\${GOLD_MAX}/g" Kbuild
-       sed -i "s/\$(GOLD_PLUS_MAX)/\${GOLD_PLUS_MAX}/g" Kbuild
-       sed -i "s/\$(SILVER_VOLT)/\${SILVER_VOLT}/g" Kbuild
-       sed -i "s/\$(GOLD_VOLT)/\${GOLD_VOLT}/g" Kbuild
-       sed -i "s/\$(GOLD_PLUS_VOLT)/\${GOLD_PLUS_VOLT}/g" Kbuild
+          sed -i "s/\$(SILVER_MAX)/\${SILVER_MAX}/g" Kbuild
+          sed -i "s/\$(GOLD_MAX)/\${GOLD_MAX}/g" Kbuild
+          sed -i "s/\$(SILVER_VOLT)/\${SILVER_VOLT}/g" Kbuild
+          sed -i "s/\$(GOLD_VOLT)/\${GOLD_VOLT}/g" Kbuild
 
       - name: Compile CPU OC Module
         run: |
           echo "🔨 Compiling CPU OC module against GKI headers..."
-
-          # Cari kernel build dir (dengan Module.symvers & .config)
           KERNEL_DIR=$(find gki/out -name "Module.symvers" -exec dirname {} \; | head -1)
           if [ -z "$KERNEL_DIR" ]; then
             echo "❌ Kernel build dir tidak ditemukan. Headers build gagal."
@@ -292,7 +262,6 @@ jobs:
           fi
 
           echo "Kernel build dir: $KERNEL_DIR"
-
           cd cpu_oc_module
           make KERNEL_DIR="$KERNEL_DIR" ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- \
@@ -301,7 +270,6 @@ jobs:
           if [ -f "garnet_cpu_oc.ko" ]; then
             echo "✅ Module compiled successfully:"
             ls -lh garnet_cpu_oc.ko
-            file garnet_cpu_oc.ko
           else
             echo "❌ Module build failed!"
             exit 1
@@ -311,55 +279,45 @@ jobs:
         run: |
           MOD_NAME="${{ github.event.inputs.module_name }}"
           echo "📦 Packaging KernelSU module: $MOD_NAME"
-
           mkdir -p ksu_module/$MOD_NAME
 
-          # Copy module .ko
           cp cpu_oc_module/garnet_cpu_oc.ko ksu_module/$MOD_NAME/
 
-          # module.prop
           cat > ksu_module/$MOD_NAME/module.prop << 'MP_EOF'
           id=garnet_cpu_oc
-          name=Garnet CPU Overclock
-          version=v1.0
-          versionCode=1
+          name=Garnet CPU Overclock Kprobe
+          version=v1.1
+          versionCode=2
           author=Payel Kernel
-          description=CPU Overclock for Poco X6 5G (garnet). Override qcom_cpufreq_hw LUT for real CPU overclocking.
+          description=CPU Overclock for Poco X6 5G (garnet) using Kprobe software hooking.
           MP_EOF
 
-          # post-fs-data.sh (load module saat boot)
           cat > ksu_module/$MOD_NAME/post-fs-data.sh << 'PFD_EOF'
           #!/system/bin/sh
           MODDIR=${0%/*}
-          insmod $MODDIR/garnet_cpu_oc.ko 2>/dev/null || \
-            echo "garnet_cpu_oc: insmod failed, check dmesg" > /data/local/tmp/cpu_oc.log
+          insmod $MODDIR/garnet_cpu_oc.ko 2>/dev/null || echo "garnet_cpu_oc: insmod failed" > /data/local/tmp/cpu_oc.log
           PFD_EOF
           chmod +x ksu_module/$MOD_NAME/post-fs-data.sh
 
-          # service.sh (reload jika crash)
           cat > ksu_module/$MOD_NAME/service.sh << 'SVC_EOF'
           #!/system/bin/sh
           MODDIR=${0%/*}
-          # Wait for cpufreq driver ready
           until [ -d /sys/devices/system/cpu/cpu0/cpufreq ]; do
             sleep 2
           done
           sleep 3
-          # Re-load jika belum loaded
           if ! lsmod | grep -q garnet_cpu_oc; then
             insmod $MODDIR/garnet_cpu_oc.ko 2>/dev/null
           fi
           SVC_EOF
           chmod +x ksu_module/$MOD_NAME/service.sh
 
-          # Package ZIP
           cd ksu_module
           TIMESTAMP=$(date +"%Y%m%d")
           ZIP_NAME="KSU-${MOD_NAME}-${TIMESTAMP}.zip"
           zip -r9 "../${ZIP_NAME}" "$MOD_NAME"
           cd ..
           echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
-          ls -lh "$ZIP_NAME"
 
       - name: Upload KSU Module
         uses: actions/upload-artifact@v4
