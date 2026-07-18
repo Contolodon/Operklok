@@ -1,377 +1,379 @@
 name: Build CPU Overclock Module (GKI 5.10)
 
-on: workflow_dispatch:
+on:
+  workflow_dispatch:
     inputs:
       kernel_headers_url:
         description: 'URL artifact kernel headers dari workflow build kernel (atau kosongkan untuk build headers juga)'
         required: false
         type: string
-    cpu_silver_max_freq: 
-      description: 'CPU Silver (LITTLE) Max Freq Khz (stock: 1958000, max aman: 2000000)'
-      required: true
-      default: '2000000'
-    cpu_gold_max_freq:
-      description: 'CPU Gold (big) Max Freq kHz (stock 2400000, max aman: 2500000)'
-      required: true
-      default: '2500000'
-    silver_opp_voltage:
-      descript ion: 'Silver Max OPP Voltage (uV, stock 744000, max aman: 760000)'
-      required: true
-      default: '760000'
-    gold_opp_voltage:
-      description: 'Gold Max OPP Voltage (uV, stock: 920000, max aman : 940000)'
-      required: true
-      default: '940000'
-    module_name:
-      description: 'Nama Module'
-      required: true
-      default: 'garnet_cpu_oc'
+      cpu_silver_max_freq: 
+        description: 'CPU Silver (LITTLE) Max Freq Khz (stock: 1958000, max aman: 2000000)'
+        required: true
+        default: '2000000'
+      cpu_gold_max_freq:
+        description: 'CPU Gold (big) Max Freq kHz (stock 2400000, max aman: 2500000)'
+        required: true
+        default: '2500000'
+      silver_opp_voltage:
+        description: 'Silver Max OPP Voltage (uV, stock 744000, max aman: 760000)'
+        required: true
+        default: '760000'
+      gold_opp_voltage:
+        description: 'Gold Max OPP Voltage (uV, stock: 920000, max aman : 940000)'
+        required: true
+        default: '940000'
+      module_name:
+        description: 'Nama Module'
+        required: true
+        default: 'garnet_cpu_oc'
+
 jobs:
   build-cpu-oc-module:
-  runs-on: ubuntu-22.04
-  timeout-minutes: 60
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
 
-  steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-    - name: Maximize Build Space
-      uses: easimon/maximize-build-space@master
-      with:
-        root-reserve-mb: 2048
-        temp-reserve-mb: 2048
-        remove-dotnet: 'true'
-        remove-android: 'true'
-        remove-haskell: 'true'
-        remove-codeql: 'true'
-        remove-docker-images: 'true'
+      - name: Maximize Build Space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 2048
+          temp-reserve-mb: 2048
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
 
-    - name: Install Build Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential bc gcc-aarch64-linux-gnu \
-          libssl-dev libfl-dev curl zip unzip lld llvm repo python3-pip \
-          cpio kmod rsync xsltproc
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc gcc-aarch64-linux-gnu \
+            libssl-dev libfl-dev curl zip unzip lld llvm repo python3-pip \
+            cpio kmod rsync xsltproc
 
-    - name: Setup Swap Space (Anti-OOM)
-      run: |
-        sudo swapoff -a 2>/dev/null || true
-        sudo rm -f /swapfile /swapfile1 2>/dev/null || true
-        sudo dd if=/dev/zero of=/swapfile1 bs=1M count=4096 status=progress
-        sudo chmod 600 /swapfile1
-        sudo mkswap /swapfile1
-        sudo swapon /swapfile1
-        free -h
+      - name: Setup Swap Space (Anti-OOM)
+        run: |
+          sudo swapoff -a 2>/dev/null || true
+          sudo rm -f /swapfile /swapfile1 2>/dev/null || true
+          sudo dd if=/dev/zero of=/swapfile1 bs=1M count=4096 status=progress
+          sudo chmod 600 /swapfile1
+          sudo mkswap /swapfile1
+          sudo swapon /swapfile1
+          free -h
 
-    - name: Sync GKI Kernel Source (untuk headers)
-      run: |
-        mkdir -p gki
-        cd gki
-        repo init -u https://android.googlesource.com/kernel/manifest \
-          -b common-android12-5.10 --depth=1
-        repo sync -c -j$(nproc) --no-tags --no-clone-bundle
+      - name: Sync GKI Kernel Source (untuk headers)
+        run: |
+          mkdir -p gki
+          cd gki
+          repo init -u https://android.googlesource.com/kernel/manifest \
+            -b common-android12-5.10 --depth=1
+          repo sync -c -j$(nproc) --no-tags --no-clone-bundle
 
-    - name: Build Kernel Headers
-      working-directory: gki
-      run: |
-        echo "Building kernel headers"
-        LTO=none BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh \
-          --skip_defconfig --skip_module_blk --headers_install 2>&1 | tee headers_build.log
+      - name: Build Kernel Headers
+        working-directory: gki
+        run: |
+          echo "Building kernel headers"
+          LTO=none BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh \
+            --skip_defconfig --skip_module_blk --headers_install 2>&1 | tee headers_build.log
 
-         if [ ! -d "out/android12-5.10/dist" ]; then
-         echo "Fallback: building headers manually..."
-         cd common
-         make O=out ARCH=arm64 gki_defconfig
-         make O=out ARCH=arm64 modules_prepare
-         cd ..
+          if [ ! -d "out/android12-5.10/dist" ]; then
+            echo "Fallback: building headers manually..."
+            cd common
+            make O=out ARCH=arm64 gki_defconfig
+            make O=out ARCH=arm64 modules_prepare
+            cd ..
 
-         mkdir -p out/android12-5.10/dist
-         cp -r out/include out/android12-5.10/dist/
-         cp out/Module.symvers out/android12-5.10/dist/ 2>/dev/null || true
-         cp out/.config out/android12-5.10/dist/ 2>/dev/null || true
-       fi
+            mkdir -p out/android12-5.10/dist
+            cp -r out/include out/android12-5.10/dist/
+            cp out/Module.symvers out/android12-5.10/dist/ 2>/dev/null || true
+            cp out/.config out/android12-5.10/dist/ 2>/dev/null || true
+          fi
 
-       echo "✅ Headers ready:"
-       find out -name "Module.symvers" | head -3
-       ls -la out/*/dist/ 2>/dev/null || ls -la out/ 2>/dev/null
+          echo "✅ Headers ready:"
+          find out -name "Module.symvers" | head -3
+          ls -la out/*/dist/ 2>/dev/null || ls -la out/ 2>/dev/null
 
-   - name: Create CPU Overclock Module Source
-     run: |
-       mkdit -p cpu_oc_module
-       cd cpu_oc_module
+      - name: Create CPU Overclock Module Source
+        run: |
+          mkdir -p cpu_oc_module
+          cd cpu_oc_module
 
-       SILVER_MAX="${{ github.event.inputs.cpu_silver_max_freq }}"
-       GOLD_MAX="${{ github.event.inputs.cpu_gold_max_freq }}"
-       SILVER_V="${{ github.event.inputs.silver_opp_voltage }}"
-       GOLD_V="${{ github.event.inputs.gold_opp_voltage }}"
-       MOD_NAME="${{ github.event.inputs.module_name }}"
+          SILVER_MAX="${{ github.event.inputs.cpu_silver_max_freq }}"
+          GOLD_MAX="${{ github.event.inputs.cpu_gold_max_freq }}"
+          SILVER_V="${{ github.event.inputs.silver_opp_voltage }}"
+          GOLD_V="${{ github.event.inputs.gold_opp_voltage }}"
+          MOD_NAME="${{ github.event.inputs.module_name }}"
 
-       echo "🗿 CPU OC Module Config:"
-       echo "  Silver:  ${SILVER_MAX} kHz @ ${SILVER_V} uV"
-       echo "  Gold:    ${GOLD_MAX} kHz @ ${GOLD_V} uV"
+          echo "🗿 CPU OC Module Config:"
+          echo "  Silver:  ${SILVER_MAX} kHz @ ${SILVER_V} uV"
+          echo "  Gold:    ${GOLD_MAX} kHz @ ${GOLD_V} uV"
 
-       cat > Makefile << 'MK_EOF'
-       obj-m := garnet_cpu_oc.o
+          cat > Makefile << 'MK_EOF'
+          obj-m := garnet_cpu_oc.o
 
-       KDIR ?= $(KERNEL_DIR)
-       ARCH ?= arm64
-       CROSS_COMPILE ?= aarch64-linux-gnu-
+          KDIR ?= $(KERNEL_DIR)
+          ARCH ?= arm64
+          CROSS_COMPILE ?= aarch64-linux-gnu-
 
-       all: module
+          all: module
 
-       module:
-         $(MAKE) -C $(KDIR) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules
+          module:
+          	$(MAKE) -C $(KDIR) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules
 
-       clean:
-      	 $(MAKE) -C $(KDIR) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) clean
-       MK_EOF
+          clean:
+          	$(MAKE) -C $(KDIR) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) clean
+          MK_EOF
 
-       cat > garnet_cpu_oc.c << 'C_EOF'
-       /*
-        * garnet_cpu_oc.c - CPU Overclock Module for Poco X6 5G (garnet)
-        *
-        * Hooks qcom_cpufreq_hw_read_lut() untuk override EFUSE LUT register.
-        * Driver qcom-cpufreq-hw membaca frequency table dari hardware register,
-        * bukan dari Device Tree. Module ini meng-override nilai yang dibaca
-        * untuk mencapai real CPU overclocking.
-        *
-        * Load via KernelSU: /data/adb/modules/garnet_cpu_oc/garnet_cpu_oc.ko
-        */
+          cat > garnet_cpu_oc.c << 'C_EOF'
+          /*
+           * garnet_cpu_oc.c - CPU Overclock Module for Poco X6 5G (garnet)
+           *
+           * Hooks qcom_cpufreq_hw_read_lut() untuk override EFUSE LUT register.
+           * Driver qcom-cpufreq-hw membaca frequency table dari hardware register,
+           * bukan dari Device Tree. Module ini meng-override nilai yang dibaca
+           * untuk mencapai real CPU overclocking.
+           *
+           * Load via KernelSU: /data/adb/modules/garnet_cpu_oc/garnet_cpu_oc.ko
+           */
 
-       #include <linux/module.h>
-       #include <linux/kernel.h>
-       #include <linux/init.h>
-       #include <linux/cpufreq.h>
-       #include <linux/io.h>
-       #include <linux/of.h>
-       #include <linux/platform_device.h>
-       #include <linux/slab.h>
-       #include <linux/kallsyms.h>
-            
-       /* Override frequencies (kHz) - diisi dari workflow input */
-       #define SILVER_MAX_FREQ   CONFIG_OC_SILVER_MAX
-       #define GOLD_MAX_FREQ     CONFIG_OC_GOLD_MAX
-                  
-       /* Override voltages (uV) */
-       #define SILVER_MAX_VOLT   CONFIG_OC_SILVER_VOLT
-       #define GOLD_MAX_VOLT     CONFIG_OC_GOLD_VOLT
+          #include <linux/module.h>
+          #include <linux/kernel.h>
+          #include <linux/init.h>
+          #include <linux/cpufreq.h>
+          #include <linux/io.h>
+          #include <linux/of.h>
+          #include <linux/platform_device.h>
+          #include <linux/slab.h>
+          #include <linux/kallsyms.h>
+               
+          /* Override frequencies (kHz) - diisi dari workflow input */
+          #define SILVER_MAX_FREQ   CONFIG_OC_SILVER_MAX
+          #define GOLD_MAX_FREQ     CONFIG_OC_GOLD_MAX
+                     
+          /* Override voltages (uV) */
+          #define SILVER_MAX_VOLT   CONFIG_OC_SILVER_VOLT
+          #define GOLD_MAX_VOLT     CONFIG_OC_GOLD_VOLT
 
-       MODULE_LICENSE("GPL");
-       MODULE_AUTHOR("Payel Kernel");           
-       MODULE_DESCRIPTION("CPU Overclock for Poco X6 5G (garnet)");           
-       MODULE_VERSION("1.0");
-       
-       /* Original function pointer untuk restore */
-       static int (*orig_read_lut)(struct cpufreq_policy *policy);
+          MODULE_LICENSE("GPL");
+          MODULE_AUTHOR("Payel Kernel");           
+          MODULE_DESCRIPTION("CPU Overclock for Poco X6 5G (garnet)");           
+          MODULE_VERSION("1.0");
+          
+          /* Original function pointer untuk restore */
+          static int (*orig_read_lut)(struct cpufreq_policy *policy);
+
+          /**
+           * Hooked version of qcom_cpufreq_hw_read_lut
+           *
+           * Setelah driver asli baca LUT dari EFUSE register,
+           * kita override freq/voltage tertinggi untuk setiap cluster.
+           */
+          static int hooked_read_lut(struct cpufreq_policy *policy)
+          {
+              int ret;
+              unsigned int cpu = policy->cpu;
+
+              /* Panggil fungsi asli dulu */
+              ret = orig_read_lut(policy);
+              if (ret < 0)
+                  return ret;
+
+              /* Override freq tertinggi berdasarkan cluster */
+              /* Garnet: CPU 0-3 = Silver, 4-7 = Gold, */
+              if (cpu <= 3) {
+                  /* Silver cluster (LITTLE) */
+                  if (policy->max < SILVER_MAX_FREQ) {
+                      pr_info("garnet_oc: Silver CPU%d: %u -> %u kHz\n",
+                          cpu, policy->max, SILVER_MAX_FREQ);
+                      policy->max = SILVER_MAX_FREQ;
+                      policy->cpuinfo.max_freq = SILVER_MAX_FREQ;
+                  }
+              } else if (cpu >= 4 && cpu <= 7) {
+                  /* Gold cluster (big) */
+                  if (policy->max < GOLD_MAX_FREQ) {
+                      pr_info("garnet_oc: Gold CPU%d: %u -> %u kHz\n",
+                          cpu, policy->max, GOLD_MAX_FREQ);
+                      policy->max = GOLD_MAX_FREQ;
+                      policy->cpuinfo.max_freq = GOLD_MAX_FREQ;
+                  }
+              }
+              /* Update freq_table (jika ada) untuk reflect new max */
+              if (policy->freq_table) {
+                  int i;
+                  for (i = 0; policy->freq_table[i].frequency != CPUFREQ_TABLE_END; i++) {
+                      /* Log saja, actual LUT override butuh register access */
+                  }
+              }
+
+              return ret;
+         }
 
        /**
-        * Hooked version of qcom_cpufreq_hw_read_lut
-        *
-        * Setelah driver asli baca LUT dari EFUSE register,
-        * kita override freq/voltage tertinggi untuk setiap cluster.
+        * Inline hook via kallsyms lookup
+        * Note: Untuk GKI 5.10, kprobes hook lebih reliable
         */
-       static int hooked_read_lut(struct cpufreq_policy *policy)
+       static int __init garnet_cpu_oc_init(void)
        {
-           int ret;
-           unsigned int cpu = policy->cpu;
+           unsigned long addr;
 
-           /* Panggil fungsi asli dulu */
-           ret = orig_read_lut(policy);
-           if (ret < 0)
-               return ret;
+           pr_info("garnet_cpu_oc: Initializing CPU Overclock Module\n");
+           pr_info("garnet_cpu_oc: Silver max=%u Gold max=%u\n",
+               SILVER_MAX_FREQ, GOLD_MAX_FREQ);
 
-           /* Override freq tertinggi berdasarkan cluster */
-           /* Garnet: CPU 0-3 = Silver, 4-7 = Gold, */
-           if (cpu <= 3) {
-               /* Silver cluster (LITTLE) */
-               if (policy->max < SILVER_MAX_FREQ) {
-                   pr_info("garnet_oc: Silver CPU%d: %u -> %u kHz\n",
-                       cpu, policy->max, SILVER_MAX_FREQ);
-                   policy->max = SILVER_MAX_FREQ;
-                   policy->cpuinfo.max_freq = SILVER_MAX_FREQ;
-               }
-           } else if (cpu >= 4 && cpu <= 7) {
-               /* Gold cluster (big) */
-               if (policy->max < GOLD_MAX_FREQ) {
-                   pr_info("garnet_oc: Gold CPU%d: %u -> %u kHz\n",
-                       cpu, policy->max, GOLD_MAX_FREQ);
-                   policy->max = GOLD_MAX_FREQ;
-                   policy->cpuinfo.max_freq = GOLD_MAX_FREQ;
-               }
-           }
-           /* Update freq_table (jika ada) untuk reflect new max */
-           if (policy->freq_table) {
-               int i;
-               for (i = 0; policy->freq_table[i].frequency != CPUFREQ_TABLE_END; i++) {
-                   /* Log saja, actual LUT override butuh register access */
-               }
+           /* Lookup alamat fungsi qcom_cpufreq_hw_read_lut */
+           if (!addr) {
+               pr_err("garnet_cpu_oc: Cannot find qcom_cpufreq_hw_read_lut\n");
+               pr_err("garnet_cpu_oc: Pastikan CONFIG_KALLSYMS=y di kernel\n");
+               return -ENOENT;
            }
 
-           return ret;
-      }
+           /* Simpan pointer asli (untuk simple approach) */
+           orig_read_lut = (void *)addr;
+           pr_info("garnet_cpu_oc: Found qcom_cpufreq_hw_read_lut at %px\n",
+                   orig_read_lut);
 
-    /**
-     * Inline hook via kallsyms lookup
-     * Note: Untuk GKI 5.10, kprobes hook lebih reliable
-     */
-    static int __init garnet_cpu_oc_init(void)
-    {
-        unsigned long addr;
+           /* TODO: Implement actual register-level LUT override
+            * - Map EFUSE register region (ioremap)
+            * - Baca nilai LUT saat ini
+            * - Tulis freq/voltage override ke register
+            * - Atau gunakan kprobe untuk intercept return value
+            * 
+            * Untuk safety, module ini saat ini hanya logging.
+            * Aktifkan register override setelah testing stabil.
+            */
 
-        pr_info("garnet_cpu_oc: Initializing CPU Overclock Module\n");
-        pr_info("garnet_cpu_oc: Silver max=%u Gold max=%u\n",
-            SILVER_MAX_FREQ, GOLD_MAX_FREQ);
+           pr_info("garnet_cpu_oc: Module loaded (logging mode)\n");
+           pr_info("garnet_cpu_oc: Untuk real OC, enable REGISTER_OVERRIDE\n");
+           return 0;
+       }
 
-        /* Lookup alamat fungsi qcom_cpufreq_hw_read_lut */
-        if (!addr) {
-            pr_err("garnet_cpu_oc: Cannot find qcom_cpufreq_hw_read_lut\n");
-            pr_err("garnet_cpu_oc: Pastikan CONFIG_KALLSYMS=y di kernel\n");
-            return -ENOENT;
-        }
+       static void __exit garnet_cpu_oc_exit(void)
+       {
+           pr_info("garnet_cpu_oc: Module unloaded\n");
+       }
 
-            /* Simpan pointer asli (untuk simple approach) */
-    orig_read_lut = (void *)addr;
-    pr_info("garnet_cpu_oc: Found qcom_cpufreq_hw_read_lut at %px\n",
-            orig_read_lut);
+       module_init(garnet_cpu_oc_init);
+       module_exit(garnet_cpu_oc_exit);
+       C_EOF
 
-    /* TODO: Implement actual register-level LUT override
-     * - Map EFUSE register region (ioremap)
-     * - Baca nilai LUT saat ini
-     * - Tulis freq/voltage override ke register
-     * - Atau gunakan kprobe untuk intercept return value
-     * 
-     * Untuk safety, module ini saat ini hanya logging.
-     * Aktifkan register override setelah testing stabil.
-     */
+       cat > Kbuild << 'KB_EOF'
+       obj-m := garnet_cpu_oc.o
 
-    pr_info("garnet_cpu_oc: Module loaded (logging mode)\n");
-    pr_info("garnet_cpu_oc: Untuk real OC, enable REGISTER_OVERRIDE\n");
-    return 0;
-}
+       ccflags-y := -DCONFIG_OC_SILVER_MAX=$(SILVER_MAX) \
+                    -DCONFIG_OC_GOLD_MAX=$(GOLD_MAX) \
+                    -DCONFIG_OC_GOLD_PLUS_MAX=$(GOLD_PLUS_MAX) \
+                    -DCONFIG_OC_SILVER_VOLT=$(SILVER_VOLT) \
+                    -DCONFIG_OC_GOLD_VOLT=$(GOLD_VOLT) \
+                    -DCONFIG_OC_GOLD_PLUS_VOLT=$(GOLD_PLUS_VOLT)
 
-static void __exit garnet_cpu_oc_exit(void)
-{
-    pr_info("garnet_cpu_oc: Module unloaded\n");
-}
+       KB_EOF
 
-module_init(garnet_cpu_oc_init);
-module_exit(garnet_cpu_oc_exit);
-C_EOF
+       # Replace placeholders in Kbuild
+       sed -i "s/\$(SILVER_MAX)/\${SILVER_MAX}/g" Kbuild
+       sed -i "s/\$(GOLD_MAX)/\${GOLD_MAX}/g" Kbuild
+       sed -i "s/\$(GOLD_PLUS_MAX)/\${GOLD_PLUS_MAX}/g" Kbuild
+       sed -i "s/\$(SILVER_VOLT)/\${SILVER_VOLT}/g" Kbuild
+       sed -i "s/\$(GOLD_VOLT)/\${GOLD_VOLT}/g" Kbuild
+       sed -i "s/\$(GOLD_PLUS_VOLT)/\${GOLD_PLUS_VOLT}/g" Kbuild
 
-cat > Kbuild << 'KB_EOF'
-obj-m := garnet_cpu_oc.o
+      - name: Compile CPU OC Module
+        run: |
+          echo "🔨 Compiling CPU OC module against GKI headers..."
 
-ccflags-y := -DCONFIG_OC_SILVER_MAX=$(SILVER_MAX) \
-             -DCONFIG_OC_GOLD_MAX=$(GOLD_MAX) \
-             -DCONFIG_OC_GOLD_PLUS_MAX=$(GOLD_PLUS_MAX) \
-             -DCONFIG_OC_SILVER_VOLT=$(SILVER_VOLT) \
-             -DCONFIG_OC_GOLD_VOLT=$(GOLD_VOLT) \
-             -DCONFIG_OC_GOLD_PLUS_VOLT=$(GOLD_PLUS_VOLT)
+          # Cari kernel build dir (dengan Module.symvers & .config)
+          KERNEL_DIR=$(find gki/out -name "Module.symvers" -exec dirname {} \; | head -1)
+          if [ -z "$KERNEL_DIR" ]; then
+            echo "❌ Kernel build dir tidak ditemukan. Headers build gagal."
+            exit 1
+          fi
 
-KB_EOF
+          echo "Kernel build dir: $KERNEL_DIR"
 
-# Replace placeholders in Kbuild
-sed -i "s/\$(SILVER_MAX)/\${SILVER_MAX}/g" Kbuild
-sed -i "s/\$(GOLD_MAX)/\${GOLD_MAX}/g" Kbuild
-sed -i "s/\$(GOLD_PLUS_MAX)/\${GOLD_PLUS_MAX}/g" Kbuild
-sed -i "s/\$(SILVER_VOLT)/\${SILVER_VOLT}/g" Kbuild
-sed -i "s/\$(GOLD_VOLT)/\${GOLD_VOLT}/g" Kbuild
-sed -i "s/\$(GOLD_PLUS_VOLT)/\${GOLD_PLUS_VOLT}/g" Kbuild
+          cd cpu_oc_module
+          make KERNEL_DIR="$KERNEL_DIR" ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CC=clang LLVM=1 2>&1 | tee module_build.log
 
-- name: Compile CPU OC Module
-  run: |
-    echo "🔨 Compiling CPU OC module against GKI headers..."
+          if [ -f "garnet_cpu_oc.ko" ]; then
+            echo "✅ Module compiled successfully:"
+            ls -lh garnet_cpu_oc.ko
+            file garnet_cpu_oc.ko
+          else
+            echo "❌ Module build failed!"
+            exit 1
+          fi
 
-    # Cari kernel build dir (dengan Module.symvers & .config)
-    KERNEL_DIR=$(find gki/out -name "Module.symvers" -exec dirname {} \; | head -1)
-    if [ -z "$KERNEL_DIR" ]; then
-      echo "❌ Kernel build dir tidak ditemukan. Headers build gagal."
-      exit 1
-    fi
+      - name: Package KernelSU Module
+        run: |
+          MOD_NAME="${{ github.event.inputs.module_name }}"
+          echo "📦 Packaging KernelSU module: $MOD_NAME"
 
-    echo "Kernel build dir: $KERNEL_DIR"
+          mkdir -p ksu_module/$MOD_NAME
 
-    cd cpu_oc_module
-    make KERNEL_DIR="$KERNEL_DIR" ARCH=arm64 \
-      CROSS_COMPILE=aarch64-linux-gnu- \
-      CC=clang LLVM=1 2>&1 | tee module_build.log
+          # Copy module .ko
+          cp cpu_oc_module/garnet_cpu_oc.ko ksu_module/$MOD_NAME/
 
-    if [ -f "garnet_cpu_oc.ko" ]; then
-      echo "✅ Module compiled successfully:"
-      ls -lh garnet_cpu_oc.ko
-      file garnet_cpu_oc.ko
-    else
-      echo "❌ Module build failed!"
-      exit 1
-    fi
+          # module.prop
+          cat > ksu_module/$MOD_NAME/module.prop << 'MP_EOF'
+          id=garnet_cpu_oc
+          name=Garnet CPU Overclock
+          version=v1.0
+          versionCode=1
+          author=Payel Kernel
+          description=CPU Overclock for Poco X6 5G (garnet). Override qcom_cpufreq_hw LUT for real CPU overclocking.
+          MP_EOF
 
-- name: Package KernelSU Module
-  run: |
-    MOD_NAME="${{ github.event.inputs.module_name }}"
-    echo "📦 Packaging KernelSU module: $MOD_NAME"
+          # post-fs-data.sh (load module saat boot)
+          cat > ksu_module/$MOD_NAME/post-fs-data.sh << 'PFD_EOF'
+          #!/system/bin/sh
+          MODDIR=${0%/*}
+          insmod $MODDIR/garnet_cpu_oc.ko 2>/dev/null || \
+            echo "garnet_cpu_oc: insmod failed, check dmesg" > /data/local/tmp/cpu_oc.log
+          PFD_EOF
+          chmod +x ksu_module/$MOD_NAME/post-fs-data.sh
 
-    mkdir -p ksu_module/$MOD_NAME
+          # service.sh (reload jika crash)
+          cat > ksu_module/$MOD_NAME/service.sh << 'SVC_EOF'
+          #!/system/bin/sh
+          MODDIR=${0%/*}
+          # Wait for cpufreq driver ready
+          until [ -d /sys/devices/system/cpu/cpu0/cpufreq ]; do
+            sleep 2
+          done
+          sleep 3
+          # Re-load jika belum loaded
+          if ! lsmod | grep -q garnet_cpu_oc; then
+            insmod $MODDIR/garnet_cpu_oc.ko 2>/dev/null
+          fi
+          SVC_EOF
+          chmod +x ksu_module/$MOD_NAME/service.sh
 
-    # Copy module .ko
-    cp cpu_oc_module/garnet_cpu_oc.ko ksu_module/$MOD_NAME/
+          # Package ZIP
+          cd ksu_module
+          TIMESTAMP=$(date +"%Y%m%d")
+          ZIP_NAME="KSU-${MOD_NAME}-${TIMESTAMP}.zip"
+          zip -r9 "../${ZIP_NAME}" "$MOD_NAME"
+          cd ..
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+          ls -lh "$ZIP_NAME"
 
-    # module.prop
-    cat > ksu_module/$MOD_NAME/module.prop << 'MP_EOF'
-    id=garnet_cpu_oc
-    name=Garnet CPU Overclock
-    version=v1.0
-    versionCode=1
-    author=Payel Kernel
-    description=CPU Overclock for Poco X6 5G (garnet). Override qcom_cpufreq_hw LUT for real CPU overclocking.
-    MP_EOF
+      - name: Upload KSU Module
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_NAME }}
 
-    # post-fs-data.sh (load module saat boot)
-    cat > ksu_module/$MOD_NAME/post-fs-data.sh << 'PFD_EOF'
-    #!/system/bin/sh
-    MODDIR=${0%/*}
-    insmod $MODDIR/garnet_cpu_oc.ko 2>/dev/null || \
-      echo "garnet_cpu_oc: insmod failed, check dmesg" > /data/local/tmp/cpu_oc.log
-    PFD_EOF
-    chmod +x ksu_module/$MOD_NAME/post-fs-data.sh
-
-    # service.sh (reload jika crash)
-    cat > ksu_module/$MOD_NAME/service.sh << 'SVC_EOF'
-    #!/system/bin/sh
-    MODDIR=${0%/*}
-    # Wait for cpufreq driver ready
-    until [ -d /sys/devices/system/cpu/cpu0/cpufreq ]; do
-      sleep 2
-    done
-    sleep 3
-    # Re-load jika belum loaded
-    if ! lsmod | grep -q garnet_cpu_oc; then
-      insmod $MODDIR/garnet_cpu_oc.ko 2>/dev/null
-    fi
-    SVC_EOF
-    chmod +x ksu_module/$MOD_NAME/service.sh
-
-    # Package ZIP
-    cd ksu_module
-    TIMESTAMP=$(date +"%Y%m%d")
-    ZIP_NAME="KSU-${MOD_NAME}-${TIMESTAMP}.zip"
-    zip -r9 "../${ZIP_NAME}" "$MOD_NAME"
-    cd ..
-    echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
-    ls -lh "$ZIP_NAME"
-
-- name: Upload KSU Module
-  uses: actions/upload-artifact@v4
-  with:
-    name: ${{ env.ZIP_NAME }}
-    path: ${{ env.ZIP_NAME }}
-
-- name: Upload Build Logs
-  if: always()
-  uses: actions/upload-artifact@v4
-  with:
-    name: cpu-oc-build-logs
-    path: |
-      cpu_oc_module/module_build.log
-      gki/headers_build.log
-    if-no-files-found: warn
-    
+      - name: Upload Build Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpu-oc-build-logs
+          path: |
+            cpu_oc_module/module_build.log
+            gki/headers_build.log
+          if-no-files-found: warn
+          
