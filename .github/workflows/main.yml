@@ -77,26 +77,22 @@ jobs:
       - name: Build Kernel Headers
         working-directory: gki
         run: |
-          echo "Building kernel headers"
-          LTO=none BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh \
-            --skip_defconfig --skip_module_blk --headers_install 2>&1 | tee headers_build.log
-
-          if [ ! -d "out/android12-5.10/dist" ]; then
-            echo "Fallback: building headers manually..."
-            cd common
-            make O=out ARCH=arm64 gki_defconfig
-            make O=out ARCH=arm64 modules_prepare
-            cd ..
-
-            mkdir -p out/android12-5.10/dist
-            cp -r out/include out/android12-5.10/dist/
-            cp out/Module.symvers out/android12-5.10/dist/ 2>/dev/null || true
-            cp out/.config out/android12-5.10/dist/ 2>/dev/null || true
-          fi
-
+          echo "Building kernel headers manually..."
+          cd common
+          
+          # Bersihkan sisa-sisa build dan arahkan output ke gki/out
+          make O=../out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- mrproper
+          
+          # Buat konfigurasi dasar GKI
+          make O=../out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
+          
+          # Siapkan headers dan cetak Module.symvers
+          make O=../out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
+          
           echo "✅ Headers ready:"
-          find out -name "Module.symvers" | head -3
-          ls -la out/*/dist/ 2>/dev/null || ls -la out/ 2>/dev/null
+          cd ..
+          find out -name "Module.symvers"
+
 
       - name: Create CPU Overclock Module Source
         run: |
@@ -256,13 +252,17 @@ jobs:
       - name: Compile CPU OC Module
         run: |
           echo "🔨 Compiling CPU OC module against GKI headers..."
-          KERNEL_DIR=$(find gki/out -name "Module.symvers" -exec dirname {} \; | head -1)
+          
+          # Update path pencarian agar akurat di manapun Module.symvers berada
+          KERNEL_DIR=$(find $GITHUB_WORKSPACE/gki -name "Module.symvers" -exec dirname {} \; | head -1)
+          
           if [ -z "$KERNEL_DIR" ]; then
             echo "❌ Kernel build dir tidak ditemukan. Headers build gagal."
             exit 1
           fi
 
           echo "Kernel build dir: $KERNEL_DIR"
+          
           cd cpu_oc_module
           make KERNEL_DIR="$KERNEL_DIR" ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- \
@@ -275,6 +275,7 @@ jobs:
             echo "❌ Module build failed!"
             exit 1
           fi
+
 
       - name: Package KernelSU Module
         run: |
