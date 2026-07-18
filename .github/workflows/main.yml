@@ -6,7 +6,7 @@ on: workflow_dispatch:
         description: 'URL artifact kernel headers dari workflow build kernel (atau kosongkan untuk build headers juga)'
         required: false
         type: string
-      cpu_silver_max_freq: 
+    cpu_silver_max_freq: 
       description: 'CPU Silver (LITTLE) Max Freq Khz (stock: 1958000, max aman: 2000000)'
       required: true
       default: '2000000'
