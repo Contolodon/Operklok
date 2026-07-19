@@ -31,33 +31,40 @@ jobs:
       - name: Compile Module
         run: |
           cd kernel_source
-          
-          # 1. Konfigurasi ulang agar benar-benar bersih
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
-          
-          # 2. Langkah vital: Pastikan semua header dan skrip siap
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- prepare
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
           
-          # 3. Buat direktori modul di luar
           cd ..
           mkdir -p cpu_oc_module
+          
+          # Di sinilah kamu menempelkan kodenya
           cat << 'EOF' > cpu_oc_module/garnet_cpu_oc.c
           #include <linux/module.h>
           #include <linux/kernel.h>
-          #include <linux/init.h>
+          #include <linux/cpufreq.h>
           #include <linux/kprobes.h>
+          #include <linux/set_memory.h>
+
           static struct kprobe kp = { .symbol_name = "qcom_cpufreq_hw_cpu_init" };
-          static int __init m_init(void) { return register_kprobe(&kp); }
+
+          static int handler_post(struct kprobe *p, struct pt_regs *regs, unsigned long flags) {
+              pr_info("Garnet OC: Mencoba menyuntikkan frekuensi ke tabel...\n");
+              // TEMPELKAN LOGIKA PATCHING DI SINI
+              // Contoh: akses tabel dan modifikasi nilai frekuensi
+              return 0;
+          }
+
+          static int __init m_init(void) {
+              kp.post_handler = handler_post;
+              return register_kprobe(&kp);
+          }
           static void __exit m_exit(void) { unregister_kprobe(&kp); }
           module_init(m_init); module_exit(m_exit);
           MODULE_LICENSE("GPL");
           EOF
           
-          # 4. Makefile ini krusial: gunakan path absolut ke kernel source yang sudah di-prepare
           echo "obj-m += garnet_cpu_oc.o" > cpu_oc_module/Makefile
-          
-          # 5. Compile: M harus mengarah ke direktori modul, KDIR ke direktori kernel yang sudah di-prepare
           make -C $(pwd)/kernel_source M=$(pwd)/cpu_oc_module ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules
           
           
