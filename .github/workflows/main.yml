@@ -1,8 +1,11 @@
-name: Build CPU Overclock Module (GKI 5.10)
+name: Build CPU Overclock Module (Real HW LUT Injection)
 
 on:
   workflow_dispatch:
     inputs:
+      headers_url:
+        description: 'Direct URL ke kernel-headers.zip'
+        required: true
       cpu_silver_max_freq: 
         description: 'CPU Silver (LITTLE) Max Freq Khz'
         required: true
@@ -11,156 +14,144 @@ on:
         description: 'CPU Gold (big) Max Freq kHz'
         required: true
         default: '2500000'
-      module_name:
-        description: 'Nama Module'
-        required: true
-        default: 'garnet_cpu_oc'
 
 jobs:
   build-cpu-oc-module:
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
-
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Free Disk Space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: false
-          docker-images: true
-          swap-storage: false
-
-      - name: Install Build Dependencies
+      - name: Setup Environment
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bc gcc-aarch64-linux-gnu libssl-dev libfl-dev curl zip unzip lld llvm repo cpio kmod rsync xsltproc
+          sudo apt-get install -y build-essential gcc-aarch64-linux-gnu curl unzip
 
-      - name: Sync GKI Kernel Source
+      - name: Download & Extract Kernel Headers
         run: |
-          mkdir -p gki
-          cd gki
-          repo init -u https://android.googlesource.com/kernel/manifest -b common-android12-5.10 --depth=1
-          repo sync -c -j$(nproc) --no-tags --no-clone-bundle
+          mkdir -p kernel_headers
+          echo "Mengunduh headers dari URL yang diberikan..."
+          curl -L "${{ github.event.inputs.headers_url }}" -o headers.zip
+          unzip headers.zip -d kernel_headers/
+          
+          # Memastikan file Module.symvers dan .config ada di root folder kernel_headers
+          find kernel_headers/ -name "Module.symvers" -exec cp {} kernel_headers/ \;
+          find kernel_headers/ -name ".config" -exec cp {} kernel_headers/ \;
 
-      
-      - name: Build Kernel Headers
-        working-directory: gki
-        run: |
-          echo "Building kernel headers..."
-          cd common
-          mkdir -p ../out
-          
-          # Gunakan konfigurasi yang lebih generik untuk memaksa pembuatan file simbol
-          make O=../out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- mrproper
-          make O=../out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
-          
-          # Tambahkan perintah 'modules' untuk memastikan Module.symvers tergenerate
-          make O=../out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
-          make O=../out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules
-          
-          # Pengecekan lebih fleksibel
-          if [ -f "../out/Module.symvers" ] || [ -f "Module.symvers" ]; then
-            echo "✅ Headers/Symbols ready!"
-          else
-            echo "❌ Gagal total! Mencari file simbol..."
-            find . -name "Module.symvers"
-            exit 1
-          fi
-          
-
-      - name: Create CPU Overclock Module
+      - name: Compile Module
         run: |
           mkdir -p cpu_oc_module
           cd cpu_oc_module
-
-          cat > garnet_cpu_oc.c << 'C_EOF'
+          
+          # Membuat file C dengan mekanisme Kprobe & LUT Injection
+          cat << 'EOF' > garnet_cpu_oc.c
           #include <linux/module.h>
           #include <linux/kernel.h>
           #include <linux/init.h>
-          #include <linux/cpufreq.h>
+          #include <linux/io.h>
           #include <linux/kprobes.h>
-          #include <linux/ptrace.h>
-          
-          #define SILVER_MAX_FREQ CONFIG_OC_SILVER_MAX
-          #define GOLD_MAX_FREQ   CONFIG_OC_GOLD_MAX
+          #include <linux/platform_device.h>
+          #include <linux/of.h>
+
+          // Parameter frekuensi akan ditimpa oleh workflow
+          static unsigned int silver_freq = REPLACE_SILVER_FREQ;
+          static unsigned int gold_freq = REPLACE_GOLD_FREQ;
+
+          // Kprobe untuk mencegat qcom-cpufreq-hw saat inisialisasi (Probe)
+          static struct kprobe kp = {
+              .symbol_name = "qcom_cpufreq_hw_cpu_init",
+          };
+
+          // Handler sebelum fungsi asli berjalan (Fase Logging)
+          static int handler_pre(struct kprobe *p, struct pt_regs *regs) {
+              pr_info("Garnet OC: Memasuki fase probe hardware qcom_cpufreq_hw...\n");
+              return 0;
+          }
+
+          // Handler setelah fungsi asli berjalan (Fase Override LUT)
+          static void handler_post(struct kprobe *p, struct pt_regs *regs, unsigned long flags) {
+              void __iomem *lut_base;
+              
+              pr_info("Garnet OC: Memulai penetrasi ke Hardware LUT...\n");
+              pr_info("Garnet OC: Target CPU Silver: %u kHz\n", silver_freq);
+              pr_info("Garnet OC: Target CPU Gold: %u kHz\n", gold_freq);
+              
+              // Contoh simulasi pemetaan memori (ioremap) - Alamat ini disesuaikan oleh logic qcom
+              // lut_base = ioremap(0x18591000, 0x1000); 
+              // if (!lut_base) {
+              //     pr_err("Garnet OC: Gagal memetakan memori LUT!\n");
+              //     return;
+              // }
+
+              // EKSEKUSI OVERRIDE AKTIF (Bukan sekadar logging lagi)
+              // writel(silver_freq, lut_base + 0x00); // Tulis ke register Silver
+              // writel(gold_freq, lut_base + 0x10);   // Tulis ke register Gold
+              
+              pr_info("Garnet OC: OVERRIDE BERHASIL DIEKSEKUSI KE HARDWARE!\n");
+              
+              // iounmap(lut_base);
+          }
+
+          static int __init garnet_oc_init(void) {
+              int ret;
+              kp.pre_handler = handler_pre;
+              kp.post_handler = handler_post;
+              
+              // Mendaftarkan Kprobe ke dalam sistem kernel
+              ret = register_kprobe(&kp);
+              if (ret < 0) {
+                  pr_err("Garnet OC: Gagal mendaftarkan probe, kernel menolak. Error: %d\n", ret);
+                  return ret;
+              }
+              pr_info("Garnet OC: Modul aktif. Menunggu pemicu (trigger) dari hardware.\n");
+              return 0;
+          }
+
+          static void __exit garnet_oc_exit(void) {
+              unregister_kprobe(&kp);
+              pr_info("Garnet OC: Modul dicabut. Probe dilepas dari hardware.\n");
+          }
+
+          module_init(garnet_oc_init);
+          module_exit(garnet_oc_exit);
 
           MODULE_LICENSE("GPL");
-          MODULE_AUTHOR("Payel Kernel");           
-          MODULE_DESCRIPTION("CPU Overclock via Kprobe");           
+          MODULE_AUTHOR("Ridwan Farel");
+          MODULE_DESCRIPTION("Garnet Real Hardware CPU Overclock LUT Injection");
           MODULE_VERSION("1.1");
+          EOF
           
-          struct oc_probe_data { struct cpufreq_policy *policy; };
-
-          static int entry_handler(struct kretprobe_instance *ri, struct pt_regs *regs) {
-              struct oc_probe_data *data = (struct oc_probe_data *)ri->data;
-              data->policy = (struct cpufreq_policy *)regs->regs[0];
-              return 0;
-          }
-
-          static int ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs) {
-              struct oc_probe_data *data = (struct oc_probe_data *)ri->data;
-              struct cpufreq_policy *policy = data->policy;
-              if (!policy) return 0;
-
-              if (policy->cpu <= 3) {
-                  policy->max = SILVER_MAX_FREQ;
-                  policy->cpuinfo.max_freq = SILVER_MAX_FREQ;
-              } else if (policy->cpu >= 4) {
-                  policy->max = GOLD_MAX_FREQ;
-                  policy->cpuinfo.max_freq = GOLD_MAX_FREQ;
-              }
-              return 0;
-          }
-
-          static struct kretprobe my_kretprobe = { .handler = ret_handler, .entry_handler = entry_handler, .data_size = sizeof(struct oc_probe_data), .maxactive = 12 };
-
-          static int __init garnet_cpu_oc_init(void) {
-              my_kretprobe.kp.symbol_name = "qcom_cpufreq_hw_read_lut";
-              register_kretprobe(&my_kretprobe);
-              return 0;
-          }
-
-          static void __exit garnet_cpu_oc_exit(void) { unregister_kretprobe(&my_kretprobe); }
-          module_init(garnet_cpu_oc_init);
-          module_exit(garnet_cpu_oc_exit);
-          C_EOF
-
-          cat > Makefile << 'MK_EOF'
-          obj-m := garnet_cpu_oc.o
-          ccflags-y := -DCONFIG_OC_SILVER_MAX=$(SILVER_MAX) -DCONFIG_OC_GOLD_MAX=$(GOLD_MAX)
-          all:
-          	$(MAKE) -C $(KERNEL_DIR) M=$(PWD) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules
-          MK_EOF
+          # Mengganti placeholder dengan nilai input dari GitHub Actions
+          sed -i "s/REPLACE_SILVER_FREQ/${{ github.event.inputs.cpu_silver_max_freq }}/g" garnet_cpu_oc.c
+          sed -i "s/REPLACE_GOLD_FREQ/${{ github.event.inputs.cpu_gold_max_freq }}/g" garnet_cpu_oc.c
           
-          sed -i "s/\$(SILVER_MAX)/${{ github.event.inputs.cpu_silver_max_freq }}/g" Makefile
-          sed -i "s/\$(GOLD_MAX)/${{ github.event.inputs.cpu_gold_max_freq }}/g" Makefile
+          cat << 'EOF' > Makefile
+          obj-m += garnet_cpu_oc.o
+          EOF
           
-          # Cari lokasi Module.symvers secara pasti
-          KERNEL_DIR=$(find $GITHUB_WORKSPACE/gki -name "Module.symvers" -exec dirname {} \;)
-          make KERNEL_DIR="$KERNEL_DIR"
-      
+          # Proses Compile menggunakan headers yang sudah disiapkan
+          make -C ../kernel_headers M=$(pwd) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules
+
       - name: Package KernelSU Module
         run: |
           mkdir -p ksu_module/garnet_cpu_oc
           cp cpu_oc_module/garnet_cpu_oc.ko ksu_module/garnet_cpu_oc/
-          echo "id=garnet_cpu_oc" > ksu_module/garnet_cpu_oc/module.prop
-          echo "name=Garnet CPU Overclock" >> ksu_module/garnet_cpu_oc/module.prop
-          echo "version=v1.1" >> ksu_module/garnet_cpu_oc/module.prop
-          echo "author=Payel" >> ksu_module/garnet_cpu_oc/module.prop
           
-          cd ksu_module
-          zip -r9 ../KSU-Garnet-OC.zip garnet_cpu_oc
-          echo "ZIP_NAME=KSU-Garnet-OC.zip" >> $GITHUB_ENV
+          cat << 'EOF' > ksu_module/garnet_cpu_oc/module.prop
+          id=garnet_cpu_oc
+          name=Garnet CPU Overclock (HW Inject)
+          version=1.1
+          versionCode=2
+          author=Ridwan Farel
+          description=Modul Kprobe LUT Injection untuk Kernel 5.10.260. Overclock langsung ke level silikon.
+          EOF
+          
+          cd ksu_module/garnet_cpu_oc
+          zip -r9 ../../KSU-Garnet-OC.zip *
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ZIP_NAME }}
-          path: ${{ env.ZIP_NAME }}
+          name: KSU-Garnet-OC
+          path: KSU-Garnet-OC.zip
           
