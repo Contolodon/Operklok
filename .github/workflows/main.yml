@@ -30,50 +30,35 @@ jobs:
 
       - name: Compile Module
         run: |
-          # 1. Pastikan folder modul ada dan bersih
-          mkdir -p cpu_oc_module
+          cd kernel_source
           
-          # 2. Buat file .c dengan isi lengkap
-          # Gunakan tanda petik pada 'EOF' agar variabel tidak dieksekusi di shell
+          # 1. Konfigurasi ulang agar benar-benar bersih
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
+          
+          # 2. Langkah vital: Pastikan semua header dan skrip siap
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- prepare
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
+          
+          # 3. Buat direktori modul di luar
+          cd ..
+          mkdir -p cpu_oc_module
           cat << 'EOF' > cpu_oc_module/garnet_cpu_oc.c
           #include <linux/module.h>
           #include <linux/kernel.h>
           #include <linux/init.h>
           #include <linux/kprobes.h>
-
-          static unsigned int silver_freq = 2000000;
-          static unsigned int gold_freq = 2500000;
-
           static struct kprobe kp = { .symbol_name = "qcom_cpufreq_hw_cpu_init" };
-
-          static int handler_pre(struct kprobe *p, struct pt_regs *regs) { return 0; }
-          static void handler_post(struct kprobe *p, struct pt_regs *regs, unsigned long flags) {
-              pr_info("Garnet OC: Override Target Silver: %u kHz, Gold: %u kHz\n", silver_freq, gold_freq);
-          }
-
-          static int __init garnet_oc_init(void) {
-              kp.pre_handler = handler_pre;
-              kp.post_handler = handler_post;
-              return register_kprobe(&kp);
-          }
-
-          static void __exit garnet_oc_exit(void) { unregister_kprobe(&kp); }
-
-          module_init(garnet_oc_init);
-          module_exit(garnet_oc_exit);
+          static int __init m_init(void) { return register_kprobe(&kp); }
+          static void __exit m_exit(void) { unregister_kprobe(&kp); }
+          module_init(m_init); module_exit(m_exit);
           MODULE_LICENSE("GPL");
-          MODULE_AUTHOR("Ridwan Farel");
-          MODULE_DESCRIPTION("Garnet Overclock");
           EOF
           
-          # 3. Buat Makefile yang sederhana
+          # 4. Makefile ini krusial: gunakan path absolut ke kernel source yang sudah di-prepare
           echo "obj-m += garnet_cpu_oc.o" > cpu_oc_module/Makefile
           
-          # 4. Masuk ke kernel source dan kompilasi
-          cd kernel_source
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- prepare
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- M=$(pwd)/../cpu_oc_module modules
+          # 5. Compile: M harus mengarah ke direktori modul, KDIR ke direktori kernel yang sudah di-prepare
+          make -C $(pwd)/kernel_source M=$(pwd)/cpu_oc_module ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules
           
           
 
