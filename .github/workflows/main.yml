@@ -27,15 +27,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential gcc-aarch64-linux-gnu curl unzip
 
-    - name: Clone Kernel Source
+        - name: Clone Kernel Source
       run: |
-       git clone --depth=1 https://github.com/ramabondanp/android_kernel_common-5.10.git kernel_source
-    
+        git clone --depth=1 https://github.com/ramabondanp/android_kernel_common-5.10.git kernel_source
 
-      - name: Compile Module
-        run: |
-          mkdir -p cpu_oc_module
-          cd cpu_oc_module
+    - name: Compile Module
+      run: |
+        mkdir -p cpu_oc_module
+        # (Salin kode garnet_cpu_oc.c dan Makefile kamu di sini)
+        
+        # Proses Compile menggunakan kernel_source yang baru di-clone
+        # Pastikan kamu berada di folder tempat file .c berada
+        make -C ../kernel_source M=$(pwd) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules
+        
           
           # Membuat file C dengan mekanisme Kprobe & LUT Injection
           cat << 'EOF' > garnet_cpu_oc.c
