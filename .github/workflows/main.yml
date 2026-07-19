@@ -49,9 +49,16 @@ jobs:
 
           static struct kprobe kp = { .symbol_name = "qcom_cpufreq_hw_cpu_init" };
 
-          static int handler_post(struct kprobe *p, struct pt_regs *regs, unsigned long flags) {
-              if (!regs) return 0;
-              struct cpufreq_policy *policy = (struct cpufreq_policy *)regs->regs[0];
+          /* FIX: Ubah dari 'int' menjadi 'void' sesuai permintaan kprobe */
+          static void handler_post(struct kprobe *p, struct pt_regs *regs, unsigned long flags) {
+              /* FIX: Deklarasi variabel HARUS paling atas (Aturan C90 Kernel) */
+              struct cpufreq_policy *policy;
+
+              if (!regs) return; /* FIX: Return void, bukan return 0 */
+
+              /* Isi variabel setelah deklarasi selesai */
+              policy = (struct cpufreq_policy *)regs->regs[0];
+
               if (policy && policy->freq_table) {
                   if (policy->freq_table[2].frequency < 3000000) { 
                       set_memory_rw((unsigned long)policy->freq_table, 1);
@@ -60,17 +67,18 @@ jobs:
                       pr_info("Garnet OC: Tabel berhasil di-patch ke 2500MHz!\n");
                   }
               }
-              return 0;
           }
 
           static int __init m_init(void) {
               if (kp.addr == NULL) {
                   kp.addr = (kprobe_opcode_t *)kallsyms_lookup_name("qcom_cpufreq_hw_cpu_init");
               }
+              
               if (kp.addr == NULL) {
                   pr_err("Garnet OC: Gagal menemukan alamat fungsi!\n");
                   return -EINVAL;
               }
+              
               kp.post_handler = handler_post;
               return register_kprobe(&kp);
           }
