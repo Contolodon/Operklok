@@ -1,112 +1,122 @@
-name: Build CPU Overclock Module (Real HW LUT Injection)
+name: Build DTBO Overclock Overlay (GPU/UFS/RAM)
 
 on:
   workflow_dispatch:
     inputs:
-      cpu_silver_max_freq: 
-        description: 'CPU Silver (LITTLE) Max Freq Khz'
+      dtbo_source_url:
+        description: 'URL stock DTBO (kosongkan untuk upload manual di repo)'
+        required: false
+      gpu_max_freq:
+        description: 'GPU Max Frequency MHz'
         required: true
-        default: '2000000'
-      cpu_gold_max_freq:
-        description: 'CPU Gold (big) Max Freq kHz'
+        default: '900'
+      gpu_opp0_voltage:
+        description: 'GPU OPP0 Voltage (uV)'
         required: true
-        default: '2500000'
+        default: '520000'
+      gpu_opp1_voltage:
+        description: 'GPU OPP1 Voltage (uV)'
+        required: true
+        default: '700000'
+      gpu_opp2_voltage:
+        description: 'GPU OPP2 Voltage (uV)'
+        required: true
+        default: '820000'
+      ufs_max_gear:
+        description: 'UFS Max Gear'
+        required: true
+        default: '4'
+      ufs_hs_mode:
+        description: 'UFS HS Mode'
+        required: true
+        default: 'HS'
+      ddr_max_bw:
+        description: 'DDR/Interconnect Max Bandwidth'
+        required: true
+        default: '6000000'
+      overlay_name:
+        description: 'Nama file overlay'
+        required: true
+        default: 'garnet-oc'
 
 jobs:
-  build-cpu-oc-module:
+  build-dtbo:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Environment
+      - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential gcc-aarch64-linux-gnu curl unzip
+          sudo apt-get install -y device-tree-compiler python3 python3-pip
+          pip3 install libfdt
 
-      - name: Clone Kernel Source
+      - name: Build DTBO Overlay
         run: |
-          git clone --depth=1 https://github.com/ramabondanp/android_kernel_common-5.10.git kernel_source
+          mkdir -p workdir && cd workdir
+          # Logic download stock DTBO dari screenshot
+          if [ -n "${{ github.event.inputs.dtbo_source_url }}" ]; then
+            curl -L "${{ github.event.inputs.dtbo_source_url }}" -o stock_dtbo.img
+          else
+            cp ../dtbo/stock_dtbo.img stock_dtbo.img
+          fi
+          
+          # Dump DTBO ke DTS agar bisa dianalisis
+          dtc -I dtb -O dts stock_dtbo.img > stock_dtbo.dts
 
-      - name: Compile Module
+          # Generate Overclock Overlay DTS (Sesuai source screenshot)
+          cat << 'EOF' > overclock_overlay.dts
+          /dts-v1/;
+          /plugin/;
+          / {
+              compatible = "xiaomi,garnet", "qcom,holi", "qcom,garnet";
+              
+              fragment@0 {
+                  target = <&msm_gpu>;
+                  __overlay__ {
+                      qcom,gpu-freq-tbl = <${{ github.event.inputs.gpu_max_freq }}000000 0>;
+                      operating-points-v2 = <&gpu_opp_table>;
+                  };
+              };
+              fragment@1 {
+                  target = <&msm_gpu>;
+                  __overlay__ {
+                      gpu_opp_table: opp-table {
+                          opp-2 {
+                              opp-hz = /bits/ 64 <${{ github.event.inputs.gpu_max_freq }}000000>;
+                              opp-microvolt = <${{ github.event.inputs.gpu_opp2_voltage }}>;
+                          };
+                      };
+                  };
+              };
+          };
+          EOF
+
+          # Compile ke DTBO
+          dtc -I dts -O dtb -o overclock_overlay.dtbo overclock_overlay.dts
+
+      - name: Create AnyKernel3 Flasher
         run: |
-          cd kernel_source
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- prepare
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 AnyKernel3
+          cp workdir/overclock_overlay.dtbo AnyKernel3/dtbo/
           
-          cd ..
-          mkdir -p cpu_oc_module
+          # Custom script flash (inject DTBO)
+          cat << 'EOF' > AnyKernel3/anykernel.sh
+          # AnyKernel3 Setup
+          properties() { 'do.devicecheck=1'; 'device.name1=garnet'; }
+          . tools/ak3-core.sh
           
-          # Membuat file C dengan source yang sudah diperbaiki
-          cat << 'EOF' > cpu_oc_module/garnet_cpu_oc.c
-          #include <linux/module.h>
-          #include <linux/kernel.h>
-          #include <linux/cpufreq.h>
-          #include <linux/kprobes.h>
-          #include <linux/set_memory.h>
-          #include <linux/kallsyms.h>
-
-          static struct kprobe kp = { .symbol_name = "qcom_cpufreq_hw_cpu_init" };
-
-          /* FIX: Ubah dari 'int' menjadi 'void' sesuai permintaan kprobe */
-          static void handler_post(struct kprobe *p, struct pt_regs *regs, unsigned long flags) {
-              /* FIX: Deklarasi variabel HARUS paling atas (Aturan C90 Kernel) */
-              struct cpufreq_policy *policy;
-
-              if (!regs) return; /* FIX: Return void, bukan return 0 */
-
-              /* Isi variabel setelah deklarasi selesai */
-              policy = (struct cpufreq_policy *)regs->regs[0];
-
-              if (policy && policy->freq_table) {
-                  if (policy->freq_table[2].frequency < 3000000) { 
-                      set_memory_rw((unsigned long)policy->freq_table, 1);
-                      policy->freq_table[2].frequency = 2500000;
-                      set_memory_ro((unsigned long)policy->freq_table, 1);
-                      pr_info("Garnet OC: Tabel berhasil di-patch ke 2500MHz!\n");
-                  }
-              }
-          }
-
-          static int __init m_init(void) {
-              if (kp.addr == NULL) {
-                  kp.addr = (kprobe_opcode_t *)kallsyms_lookup_name("qcom_cpufreq_hw_cpu_init");
-              }
-              
-              if (kp.addr == NULL) {
-                  pr_err("Garnet OC: Gagal menemukan alamat fungsi!\n");
-                  return -EINVAL;
-              }
-              
-              kp.post_handler = handler_post;
-              return register_kprobe(&kp);
-          }
-
-          static void __exit m_exit(void) {
-              unregister_kprobe(&kp);
-          }
-
-          module_init(m_init);
-          module_exit(m_exit);
-          MODULE_LICENSE("GPL");
+          # Flash DTBO
+          flash_part dtbo overclock_overlay.dtbo
           EOF
           
-          echo "obj-m += garnet_cpu_oc.o" > cpu_oc_module/Makefile
-          make -C $(pwd)/kernel_source M=$(pwd)/cpu_oc_module ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules
-
-      - name: Package KernelSU Module
-        run: |
-          mkdir -p ksu_module/garnet_cpu_oc
-          cp cpu_oc_module/garnet_cpu_oc.ko ksu_module/garnet_cpu_oc/
-          echo -e "id=garnet_cpu_oc\nname=Garnet CPU Overclock (HW Inject)\nversion=1.1\nauthor=Ridwan Farel\ndescription=Modul Kprobe LUT Injection." > ksu_module/garnet_cpu_oc/module.prop
-          
-          cd ksu_module
-          zip -r9 ../KSU-Garnet-OC.zip *
+          cd AnyKernel3
+          zip -r9 ../DTBO-OC-${{ github.event.inputs.overlay_name }}.zip *
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: KSU-Garnet-OC
-          path: KSU-Garnet-OC.zip
+          name: DTBO-OC-Overlay
+          path: DTBO-OC-*.zip
           
