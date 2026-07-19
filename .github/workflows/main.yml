@@ -33,18 +33,19 @@ jobs:
           # 1. Masuk ke direktori kernel source
           cd kernel_source
           
-          # 2. Siapkan konfigurasi kernel (Wajib agar auto.conf terbentuk)
-          # Menggunakan defconfig untuk konfigurasi standar (bisa diganti jika punya file .config khusus)
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- vendor/garnet_defconfig
+          # 2. Siapkan konfigurasi menggunakan gki_defconfig
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- prepare
           
           # 3. Kembali ke folder modul untuk kompilasi
           cd ..
           mkdir -p cpu_oc_module
-          # (Tambahkan perintah untuk membuat file garnet_cpu_oc.c dan Makefile di sini seperti sebelumnya)
           
-          # 4. Compile modul
+          # (Pastikan file garnet_cpu_oc.c dan Makefile sudah ada di cpu_oc_module)
+          
+          # 4. Compile modul dengan mengarahkan ke kernel_source yang sudah dikonfigurasi
           make -C kernel_source M=$(pwd)/cpu_oc_module ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules
+          
           
 
       - name: Package KernelSU Module
