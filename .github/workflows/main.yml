@@ -30,24 +30,49 @@ jobs:
 
       - name: Compile Module
         run: |
-          # 1. Masuk ke direktori kernel source
-          cd kernel_source
+          # 1. Pastikan folder modul ada dan bersih
+          mkdir -p cpu_oc_module
           
-          # 2. Siapkan konfigurasi (Penting agar script/module.lds terbentuk)
+          # 2. Buat file .c dengan isi lengkap
+          # Gunakan tanda petik pada 'EOF' agar variabel tidak dieksekusi di shell
+          cat << 'EOF' > cpu_oc_module/garnet_cpu_oc.c
+          #include <linux/module.h>
+          #include <linux/kernel.h>
+          #include <linux/init.h>
+          #include <linux/kprobes.h>
+
+          static unsigned int silver_freq = 2000000;
+          static unsigned int gold_freq = 2500000;
+
+          static struct kprobe kp = { .symbol_name = "qcom_cpufreq_hw_cpu_init" };
+
+          static int handler_pre(struct kprobe *p, struct pt_regs *regs) { return 0; }
+          static void handler_post(struct kprobe *p, struct pt_regs *regs, unsigned long flags) {
+              pr_info("Garnet OC: Override Target Silver: %u kHz, Gold: %u kHz\n", silver_freq, gold_freq);
+          }
+
+          static int __init garnet_oc_init(void) {
+              kp.pre_handler = handler_pre;
+              kp.post_handler = handler_post;
+              return register_kprobe(&kp);
+          }
+
+          static void __exit garnet_oc_exit(void) { unregister_kprobe(&kp); }
+
+          module_init(garnet_oc_init);
+          module_exit(garnet_oc_exit);
+          MODULE_LICENSE("GPL");
+          MODULE_AUTHOR("Ridwan Farel");
+          MODULE_DESCRIPTION("Garnet Overclock");
+          EOF
+          
+          # 3. Buat Makefile yang sederhana
+          echo "obj-m += garnet_cpu_oc.o" > cpu_oc_module/Makefile
+          
+          # 4. Masuk ke kernel source dan kompilasi
+          cd kernel_source
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- prepare
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- scripts
-          
-          # 3. Pindahkan lokasi modul ke DALAM kernel_source agar terdeteksi dengan benar
-          mkdir -p ../cpu_oc_module
-          # (Salin file .c dan Makefile ke folder yang benar)
-          cat << 'EOF' > ../cpu_oc_module/garnet_cpu_oc.c
-          #include <linux/module.h>
-          // ... (isi kode C kamu tetap sama)
-          EOF
-          echo "obj-m += garnet_cpu_oc.o" > ../cpu_oc_module/Makefile
-          
-          # 4. Compile dengan path M yang tepat di dalam tree
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- M=$(pwd)/../cpu_oc_module modules
           
           
