@@ -27,16 +27,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential gcc-aarch64-linux-gnu curl unzip
 
-      - name: Download & Extract Kernel Headers
-        run: |
-          mkdir -p kernel_headers
-          echo "Mengunduh headers dari URL yang diberikan..."
-          curl -L "${{ github.event.inputs.headers_url }}" -o headers.zip
-          unzip headers.zip -d kernel_headers/
-          
-          # Memastikan file Module.symvers dan .config ada di root folder kernel_headers
-          find kernel_headers/ -name "Module.symvers" -exec cp {} kernel_headers/ \;
-          find kernel_headers/ -name ".config" -exec cp {} kernel_headers/ \;
+    - name: Clone Kernel Source
+      run: |
+       git clone --depth=1 https://github.com/ramabondanp/android_kernel_common-5.10.git kernel_source
+    
 
       - name: Compile Module
         run: |
