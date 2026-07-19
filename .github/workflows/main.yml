@@ -37,70 +37,60 @@ jobs:
           
           cd ..
           mkdir -p cpu_oc_module
+          
+          # Membuat file C dengan source yang sudah diperbaiki
           cat << 'EOF' > cpu_oc_module/garnet_cpu_oc.c
           #include <linux/module.h>
-#include <linux/kernel.h>
-#include <linux/cpufreq.h>
-#include <linux/kprobes.h>
-#include <linux/set_memory.h>
-#include <linux/kallsyms.h> // Tambahkan ini untuk pencarian simbol dinamis
+          #include <linux/kernel.h>
+          #include <linux/cpufreq.h>
+          #include <linux/kprobes.h>
+          #include <linux/set_memory.h>
+          #include <linux/kallsyms.h>
 
-static struct kprobe kp = { 
-    .symbol_name = "qcom_cpufreq_hw_cpu_init" 
-};
+          static struct kprobe kp = { .symbol_name = "qcom_cpufreq_hw_cpu_init" };
 
-static int handler_post(struct kprobe *p, struct pt_regs *regs, unsigned long flags) {
-    // Pastikan regs valid sebelum akses
-    if (!regs) return 0;
+          static int handler_post(struct kprobe *p, struct pt_regs *regs, unsigned long flags) {
+              if (!regs) return 0;
+              struct cpufreq_policy *policy = (struct cpufreq_policy *)regs->regs[0];
+              if (policy && policy->freq_table) {
+                  if (policy->freq_table[2].frequency < 3000000) { 
+                      set_memory_rw((unsigned long)policy->freq_table, 1);
+                      policy->freq_table[2].frequency = 2500000;
+                      set_memory_ro((unsigned long)policy->freq_table, 1);
+                      pr_info("Garnet OC: Tabel berhasil di-patch ke 2500MHz!\n");
+                  }
+              }
+              return 0;
+          }
 
-    struct cpufreq_policy *policy = (struct cpufreq_policy *)regs->regs[0];
+          static int __init m_init(void) {
+              if (kp.addr == NULL) {
+                  kp.addr = (kprobe_opcode_t *)kallsyms_lookup_name("qcom_cpufreq_hw_cpu_init");
+              }
+              if (kp.addr == NULL) {
+                  pr_err("Garnet OC: Gagal menemukan alamat fungsi!\n");
+                  return -EINVAL;
+              }
+              kp.post_handler = handler_post;
+              return register_kprobe(&kp);
+          }
 
-    // Validasi pointer policy sebelum akses memori
-    if (policy && policy->freq_table) {
-        // Cek apakah tabel frekuensi berada di rentang memori yang diizinkan
-        // Menambahkan perlindungan agar tidak memori yang bukan milik tabel
-        if (policy->freq_table[2].frequency < 3000000) { 
-            set_memory_rw((unsigned long)policy->freq_table, 1);
-            
-            policy->freq_table[2].frequency = 2500000;
-            
-            set_memory_ro((unsigned long)policy->freq_table, 1);
-            pr_info("Garnet OC: Tabel berhasil di-patch ke 2500MHz!\n");
-        }
-    }
-    return 0;
-}
+          static void __exit m_exit(void) {
+              unregister_kprobe(&kp);
+          }
 
-static int __init m_init(void) {
-    // Jika symbol_name gagal, kita coba cari alamatnya secara manual
-    if (kp.addr == NULL) {
-        kp.addr = (kprobe_opcode_t *)kallsyms_lookup_name("qcom_cpufreq_hw_cpu_init");
-    }
-
-    if (kp.addr == NULL) {
-        pr_err("Garnet OC: Gagal menemukan alamat fungsi!\n");
-        return -EINVAL;
-    }
-
-    kp.post_handler = handler_post;
-    return register_kprobe(&kp);
-}
-
-static void __exit m_exit(void) {
-    unregister_kprobe(&kp);
-}
-
-module_init(m_init);
-module_exit(m_exit);
-MODULE_LICENSE("GPL");
-
+          module_init(m_init);
+          module_exit(m_exit);
+          MODULE_LICENSE("GPL");
+          EOF
           
+          echo "obj-m += garnet_cpu_oc.o" > cpu_oc_module/Makefile
+          make -C $(pwd)/kernel_source M=$(pwd)/cpu_oc_module ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules
 
       - name: Package KernelSU Module
         run: |
           mkdir -p ksu_module/garnet_cpu_oc
           cp cpu_oc_module/garnet_cpu_oc.ko ksu_module/garnet_cpu_oc/
-          
           echo -e "id=garnet_cpu_oc\nname=Garnet CPU Overclock (HW Inject)\nversion=1.1\nauthor=Ridwan Farel\ndescription=Modul Kprobe LUT Injection." > ksu_module/garnet_cpu_oc/module.prop
           
           cd ksu_module
