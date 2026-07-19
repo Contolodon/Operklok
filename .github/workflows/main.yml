@@ -30,49 +30,22 @@ jobs:
 
       - name: Compile Module
         run: |
-          # 1. Persiapan folder modul
+          # 1. Masuk ke direktori kernel source
+          cd kernel_source
+          
+          # 2. Siapkan konfigurasi kernel (Wajib agar auto.conf terbentuk)
+          # Menggunakan defconfig untuk konfigurasi standar (bisa diganti jika punya file .config khusus)
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- vendor/garnet_defconfig
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- prepare
+          
+          # 3. Kembali ke folder modul untuk kompilasi
+          cd ..
           mkdir -p cpu_oc_module
+          # (Tambahkan perintah untuk membuat file garnet_cpu_oc.c dan Makefile di sini seperti sebelumnya)
           
-          # 2. Membuat file C
-          cat << 'EOF' > cpu_oc_module/garnet_cpu_oc.c
-          #include <linux/module.h>
-          #include <linux/kernel.h>
-          #include <linux/init.h>
-          #include <linux/kprobes.h>
+          # 4. Compile modul
+          make -C kernel_source M=$(pwd)/cpu_oc_module ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules
           
-          static unsigned int silver_freq = REPLACE_SILVER_FREQ;
-          static unsigned int gold_freq = REPLACE_GOLD_FREQ;
-
-          static struct kprobe kp = { .symbol_name = "qcom_cpufreq_hw_cpu_init" };
-
-          static int handler_pre(struct kprobe *p, struct pt_regs *regs) { return 0; }
-          static void handler_post(struct kprobe *p, struct pt_regs *regs, unsigned long flags) {
-              pr_info("Garnet OC: Override Target Silver: %u kHz, Gold: %u kHz\n", silver_freq, gold_freq);
-          }
-
-          static int __init garnet_oc_init(void) {
-              kp.pre_handler = handler_pre;
-              kp.post_handler = handler_post;
-              return register_kprobe(&kp);
-          }
-
-          static void __exit garnet_oc_exit(void) { unregister_kprobe(&kp); }
-
-          module_init(garnet_oc_init);
-          module_exit(garnet_oc_exit);
-          MODULE_LICENSE("GPL");
-          EOF
-          
-          # 3. Ganti placeholder
-          sed -i "s/REPLACE_SILVER_FREQ/${{ github.event.inputs.cpu_silver_max_freq }}/g" cpu_oc_module/garnet_cpu_oc.c
-          sed -i "s/REPLACE_GOLD_FREQ/${{ github.event.inputs.cpu_gold_max_freq }}/g" cpu_oc_module/garnet_cpu_oc.c
-          
-          # 4. Membuat Makefile
-          echo "obj-m += garnet_cpu_oc.o" > cpu_oc_module/Makefile
-          
-          # 5. Proses Compile (Mengarahkan ke folder kernel_source hasil clone)
-          cd cpu_oc_module
-          make -C ../kernel_source M=$(pwd) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules
 
       - name: Package KernelSU Module
         run: |
