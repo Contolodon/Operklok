@@ -37,8 +37,6 @@ jobs:
           
           cd ..
           mkdir -p cpu_oc_module
-          
-          # Di sinilah kamu menempelkan kodenya
           cat << 'EOF' > cpu_oc_module/garnet_cpu_oc.c
           #include <linux/module.h>
           #include <linux/kernel.h>
@@ -49,9 +47,17 @@ jobs:
           static struct kprobe kp = { .symbol_name = "qcom_cpufreq_hw_cpu_init" };
 
           static int handler_post(struct kprobe *p, struct pt_regs *regs, unsigned long flags) {
-              pr_info("Garnet OC: Mencoba menyuntikkan frekuensi ke tabel...\n");
-              // TEMPELKAN LOGIKA PATCHING DI SINI
-              // Contoh: akses tabel dan modifikasi nilai frekuensi
+              struct cpufreq_policy *policy = (struct cpufreq_policy *)regs->regs[0];
+
+              if (policy && policy->freq_table) {
+                  set_memory_rw((unsigned long)policy->freq_table, 1);
+                  
+                  // Pastikan indeks [2] benar-benar target frekuensi maksimal di kernel kamu
+                  policy->freq_table[2].frequency = 2500000;
+                  
+                  set_memory_ro((unsigned long)policy->freq_table, 1);
+                  pr_info("Garnet OC: Tabel berhasil di-patch ke 2500MHz!\n");
+              }
               return 0;
           }
 
@@ -59,14 +65,20 @@ jobs:
               kp.post_handler = handler_post;
               return register_kprobe(&kp);
           }
-          static void __exit m_exit(void) { unregister_kprobe(&kp); }
-          module_init(m_init); module_exit(m_exit);
+
+          static void __exit m_exit(void) {
+              unregister_kprobe(&kp);
+          }
+
+          module_init(m_init);
+          module_exit(m_exit);
           MODULE_LICENSE("GPL");
           EOF
           
           echo "obj-m += garnet_cpu_oc.o" > cpu_oc_module/Makefile
           make -C $(pwd)/kernel_source M=$(pwd)/cpu_oc_module ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules
           
+
           
 
       - name: Package KernelSU Module
